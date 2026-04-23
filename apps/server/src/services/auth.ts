@@ -1,5 +1,5 @@
 import { and, eq, gt } from "drizzle-orm";
-import { getCookie, setCookie } from "hono/cookie";
+import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { Context, MiddlewareHandler } from "hono";
 import { db } from "../db/client";
 import { adminGrants, people, sessions } from "../db/schema";
@@ -39,6 +39,12 @@ export async function createSession(c: Context, personId?: string) {
   });
 
   return session;
+}
+
+export async function destroySession(c: Context) {
+  const id = getCookie(c, "cot_session");
+  if (id) await db.delete(sessions).where(eq(sessions.id, id));
+  deleteCookie(c, "cot_session", { path: "/" });
 }
 
 export async function readSession(c: Context): Promise<AppSession | null> {

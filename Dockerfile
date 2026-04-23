@@ -18,4 +18,4 @@ COPY --from=build /app/node_modules /app/node_modules
 COPY --from=build /app/apps/server /app/apps/server
 COPY --from=build /app/apps/web/dist /app/apps/web/dist
 EXPOSE 3007
-CMD ["sh", "-lc", "cd apps/server && bun db:migrate && cd ../.. && bun apps/server/src/index.ts"]
+CMD ["bun", "apps/server/src/index.ts"]

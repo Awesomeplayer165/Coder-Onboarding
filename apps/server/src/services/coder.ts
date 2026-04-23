@@ -121,6 +121,15 @@ export class CoderClient {
     return Array.isArray(result) ? result : result.workspaces;
   }
 
+  async getWorkspaceByUserAndName(user: string, workspaceName: string) {
+    try {
+      return await this.request<CoderWorkspace>(`/users/${encodeURIComponent(user)}/workspace/${encodeURIComponent(workspaceName)}`);
+    } catch (error) {
+      if (error instanceof CoderApiError && error.status === 404) return null;
+      throw error;
+    }
+  }
+
   async createWorkspace(input: {
     user: string;
     name: string;
@@ -159,6 +168,12 @@ export class CoderClient {
         transition,
         reason: "dashboard"
       })
+    });
+  }
+
+  async deleteUser(user: string) {
+    return this.request(`/users/${encodeURIComponent(user)}`, {
+      method: "DELETE"
     });
   }
 }

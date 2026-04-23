@@ -23,3 +23,20 @@ export function usernamePart(value: string) {
 export function personDisplayName(firstName: string, lastName: string) {
   return `${firstName.trim()} ${lastName.trim()}`.trim();
 }
+
+export function titleCaseNamePart(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .split(/([\s-]+)/)
+    .map((part) => (/^[a-z]/.test(part) ? `${part[0]!.toUpperCase()}${part.slice(1)}` : part))
+    .join("")
+    .replace(/\s+/g, " ");
+}
+
+export function cleanPersonName(firstName: string, lastName: string) {
+  return {
+    firstName: titleCaseNamePart(firstName),
+    lastName: titleCaseNamePart(lastName)
+  };
+}

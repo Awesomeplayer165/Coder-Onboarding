@@ -2,7 +2,7 @@
   "name": "@coder-onboarding/server",
   "type": "module",
   "scripts": {
-    "dev": "bun --hot src/index.ts",
+    "dev": "bun --env-file=../../.env --hot src/index.ts",
     "build": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "db:generate": "drizzle-kit generate",

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { ArrowLeft, ArrowRight } from "lucide-react";
 import type { PublicGroup } from "../lib/types";
 import { api } from "../lib/api";
 import { Button } from "../components/ui/Button";
@@ -37,6 +38,15 @@ export function OnboardingPage({ group, onBack, onCredentials }: { group: Public
   const [customEmail, setCustomEmail] = useState("");
   const [suggestions, setSuggestions] = useState<{ id: string; name: string; lastLoginAt: string | null }[]>([]);
   const [error, setError] = useState("");
+
+  function updateName(part: "firstName" | "lastName", value: string) {
+    setName((current) => ({ ...current, [part]: value }));
+    if (matches !== null) {
+      setMatches(null);
+      setEmailOptions({});
+      setCustomEmail("");
+    }
+  }
 
   useEffect(() => {
     const q = `${name.firstName} ${name.lastName}`.trim();
@@ -98,18 +108,19 @@ export function OnboardingPage({ group, onBack, onCredentials }: { group: Public
   return (
     <main className="center-screen">
       <Card className="onboard-card">
-        <button className="text-button" type="button" onClick={onBack}>
-          Back
+        <button className="text-button back-button" type="button" onClick={onBack}>
+          <ArrowLeft size={16} /> Back
         </button>
+        <p className="eyebrow">Continue with your name</p>
         <h1>{group.name}</h1>
         <p>Enter your name to find or create your Coder credentials.</p>
         <form className="stack" onSubmit={matches === null ? lookup : register}>
           <div className="two-col">
             <Field label="First name">
-              <Input value={name.firstName} onChange={(event) => setName({ ...name, firstName: event.target.value })} required />
+              <Input value={name.firstName} onChange={(event) => updateName("firstName", event.target.value)} required />
             </Field>
             <Field label="Last name">
-              <Input value={name.lastName} onChange={(event) => setName({ ...name, lastName: event.target.value })} required />
+              <Input value={name.lastName} onChange={(event) => updateName("lastName", event.target.value)} required />
             </Field>
           </div>
           {suggestions.length > 0 && matches === null ? (
@@ -122,7 +133,7 @@ export function OnboardingPage({ group, onBack, onCredentials }: { group: Public
               ))}
             </div>
           ) : null}
-          {matches === null ? <Button type="submit">Submit</Button> : null}
+          {matches === null ? <Button type="submit">Submit <ArrowRight size={16} /></Button> : null}
           {matches && matches.length > 0 ? (
             <div className="match-list">
               <h2>Is this you?</h2>
@@ -145,14 +156,18 @@ export function OnboardingPage({ group, onBack, onCredentials }: { group: Public
               <p className="subtle">If you believe you already have an account, talk to an admin.</p>
               <div className="email-options">
                 <label className="radio-card recommended">
-                  <input type="radio" checked={emailMode === "custom"} onChange={() => setEmailMode("custom")} />
-                  <span>Use a personal email</span>
+                  <div className="radio-line">
+                    <input type="radio" checked={emailMode === "custom"} onChange={() => setEmailMode("custom")} />
+                    <span>Use a personal email</span>
+                  </div>
                   <Input type="email" value={customEmail} onChange={(event) => setCustomEmail(event.target.value)} placeholder="you@example.com" />
                 </label>
                 {(["first.last", "firstlast", "f.lastname"] as const).map((mode) => (
                   <label className="radio-card" key={mode}>
-                    <input type="radio" checked={emailMode === mode} onChange={() => setEmailMode(mode)} />
-                    <span>{emailOptions[mode]}</span>
+                    <div className="radio-line">
+                      <input type="radio" checked={emailMode === mode} onChange={() => setEmailMode(mode)} />
+                      <span>{emailOptions[mode]}</span>
+                    </div>
                   </label>
                 ))}
               </div>

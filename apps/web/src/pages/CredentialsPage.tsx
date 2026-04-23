@@ -1,4 +1,5 @@
 import { Copy, ExternalLink } from "lucide-react";
+import { useState } from "react";
 import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
 
@@ -9,8 +10,12 @@ export function CredentialsPage({
   credentials: { email: string; password: string; coderLoginUrl: string };
   onDone: () => void;
 }) {
+  const [copied, setCopied] = useState<string | null>(null);
+
   function copy(value: string) {
     navigator.clipboard.writeText(value).catch(() => undefined);
+    setCopied(value);
+    window.setTimeout(() => setCopied(null), 900);
   }
 
   return (
@@ -21,14 +26,14 @@ export function CredentialsPage({
         <div className="credential-box">
           <span>Email</span>
           <strong>{credentials.email}</strong>
-          <button type="button" onClick={() => copy(credentials.email)} aria-label="Copy email">
+          <button className={copied === credentials.email ? "copied" : ""} type="button" onClick={() => copy(credentials.email)} aria-label="Copy email">
             <Copy size={18} />
           </button>
         </div>
         <div className="credential-box">
           <span>Password</span>
           <strong>{credentials.password}</strong>
-          <button type="button" onClick={() => copy(credentials.password)} aria-label="Copy password">
+          <button className={copied === credentials.password ? "copied" : ""} type="button" onClick={() => copy(credentials.password)} aria-label="Copy password">
             <Copy size={18} />
           </button>
         </div>

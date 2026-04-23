@@ -6,6 +6,8 @@ services:
     env_file:
       - path: .env
         required: false
+    environment:
+      CODER_ONBOARDING_DOCKER: "true"
     ports:
       - "${PORT:-3007}:3007"
     depends_on:

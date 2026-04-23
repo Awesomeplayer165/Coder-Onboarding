@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { serveStatic } from "hono/bun";
+import { streamSSE } from "hono/streaming";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "../db/client";
@@ -17,13 +18,14 @@ import {
 } from "../db/schema";
 import { getEnv } from "../env";
 import { coder } from "../services/coder";
-import { createSession, attachSession, requireAdmin, requireCsrf, type AppSession } from "../services/auth";
+import { createSession, attachSession, destroySession, requireAdmin, requireCsrf, type AppSession } from "../services/auth";
 import { decryptSecret, encryptSecret } from "../services/crypto";
 import { audit } from "../services/audit";
+import { addAdminSocket, broadcastAdminUpdate, removeAdminSocket } from "../services/live";
 import { createOidcStart, redeemOidcCode, type OidcConfig } from "../services/oidc";
 import { deriveEmail, emailOptions, coderLoginUrl } from "../domain/email";
 import { findNameMatches, isConfidentAutocomplete, type FuzzyCandidate } from "../domain/fuzzy";
-import { normalizedFullName, personDisplayName } from "../domain/names";
+import { cleanPersonName, normalizedFullName, personDisplayName } from "../domain/names";
 import { parsePeopleCsv } from "../domain/csv";
 import { ipv4Allowed } from "../domain/ip";
 import { runWorkspaceJob } from "../jobs/workspace-jobs";
@@ -93,24 +95,51 @@ async function createOrSyncCoderUser(person: typeof people.$inferSelect) {
 
 async function maybeCreateDefaultWorkspace(person: typeof people.$inferSelect, group: typeof groups.$inferSelect) {
   if (!group.autoCreateWorkspace || !group.coderTemplateId) return null;
-  if (!person.coderUsername) return null;
+  const coderUser = person.coderUsername ?? person.coderUserId;
+  if (!coderUser) return null;
 
   const known = await db
     .select()
     .from(workspaceRecords)
     .where(and(eq(workspaceRecords.personId, person.id), eq(workspaceRecords.name, "main")))
     .limit(1);
-  if (known[0]) return known[0];
+	  if (known[0]) return known[0];
+
+  const existingCoderWorkspace = await coder.getWorkspaceByUserAndName(coderUser, "main");
+  if (existingCoderWorkspace) {
+    const [record] = await db
+      .insert(workspaceRecords)
+      .values({
+        personId: person.id,
+        groupId: group.id,
+        coderWorkspaceId: existingCoderWorkspace.id,
+        name: existingCoderWorkspace.name,
+        status: existingCoderWorkspace.latest_build?.status ?? "unknown",
+        templateName: existingCoderWorkspace.template_display_name ?? existingCoderWorkspace.template_name ?? group.coderTemplateName
+      })
+      .onConflictDoUpdate({
+        target: workspaceRecords.coderWorkspaceId,
+        set: {
+          personId: person.id,
+          groupId: group.id,
+          status: existingCoderWorkspace.latest_build?.status ?? "unknown",
+          templateName: existingCoderWorkspace.template_display_name ?? existingCoderWorkspace.template_name ?? group.coderTemplateName,
+          lastSyncedAt: new Date()
+        }
+      })
+      .returning();
+    return record ?? null;
+  }
 
   const workspace = await coder.createWorkspace({
-    user: person.coderUsername,
+    user: coderUser,
     name: "main",
     templateId: group.coderTemplateId,
     templateVersionPresetId: group.coderTemplatePresetId,
     parameters: group.coderParameters
   });
 
-  const [record] = await db
+	  const [record] = await db
     .insert(workspaceRecords)
     .values({
       personId: person.id,
@@ -119,9 +148,43 @@ async function maybeCreateDefaultWorkspace(person: typeof people.$inferSelect, g
       name: workspace.name,
       status: workspace.latest_build?.status ?? "created",
       templateName: group.coderTemplateName
-    })
-    .returning();
+	    })
+	    .returning();
+  broadcastAdminUpdate("workspace.created", { personId: person.id, groupId: group.id });
   return record ?? null;
+}
+
+async function deletePersonEverywhere(person: typeof people.$inferSelect) {
+  const localWorkspaces = await db.select().from(workspaceRecords).where(eq(workspaceRecords.personId, person.id));
+  const coderWorkspaces = person.coderUsername ? await coder.listWorkspaces(person.coderUsername).catch(() => []) : [];
+  const workspaceIds = new Set(localWorkspaces.map((workspace) => workspace.coderWorkspaceId));
+  for (const workspace of coderWorkspaces) {
+    if (
+      workspace.owner_id === person.coderUserId ||
+      workspace.owner_name === person.coderUsername ||
+      workspace.owner_name === person.email ||
+      localWorkspaces.some((local) => local.coderWorkspaceId === workspace.id)
+    ) {
+      workspaceIds.add(workspace.id);
+    }
+  }
+  for (const workspaceId of workspaceIds) {
+    await coder.createWorkspaceBuild(workspaceId, "delete").catch(() => undefined);
+  }
+
+  const coderIdentifier = person.coderUserId ?? person.coderUsername ?? person.email;
+  if (coderIdentifier) {
+    await coder.deleteUser(coderIdentifier).catch(async (error) => {
+      if (person.coderUsername && person.coderUsername !== coderIdentifier) {
+        await coder.deleteUser(person.coderUsername);
+        return;
+      }
+      throw error;
+    });
+  }
+
+  await db.delete(workspaceRecords).where(eq(workspaceRecords.personId, person.id));
+  await db.delete(people).where(eq(people.id, person.id));
 }
 
 async function credentialResponse(personId: string) {
@@ -204,6 +267,16 @@ const registerSchema = z.object({
   customEmail: z.string().optional()
 });
 
+const adminCreatePersonSchema = z.object({
+  groupId: z.string().uuid(),
+  firstName: z.string().min(1),
+  lastName: z.string().min(1),
+  role: z.enum(["participant", "reviewer", "admin"]).default("participant"),
+  emailMode: z.enum(["first.last", "firstlast", "f.lastname", "custom"]).default("first.last"),
+  customEmail: z.string().optional(),
+  createInCoderNow: z.boolean().default(false)
+});
+
 export function buildApp() {
   const app = new Hono();
   app.use("*", attachSession);
@@ -214,6 +287,25 @@ export function buildApp() {
   });
 
   app.get("/api/health", (c) => c.json({ ok: true }));
+
+  app.get("/api/admin/live", (c) => {
+    const denied = requireAdmin(c);
+    if (denied) return denied;
+    return streamSSE(c, async (stream) => {
+      const socket = {
+        send: (message: string) => {
+          void stream.writeSSE({ data: message });
+        }
+      };
+      addAdminSocket(socket);
+      await stream.writeSSE({ data: JSON.stringify({ type: "admin.ready", at: new Date().toISOString() }) });
+      stream.onAbort(() => removeAdminSocket(socket));
+      while (!stream.aborted) {
+        await stream.sleep(25000);
+        await stream.writeSSE({ event: "ping", data: new Date().toISOString() });
+      }
+    });
+  });
 
   app.get("/api/bootstrap", async (c) => {
     const org = await singletonOrganization();
@@ -265,14 +357,15 @@ export function buildApp() {
       await db.insert(adminGrants).values({ email: input.firstAdminEmail.toLowerCase() });
       const [reviewerGroup] = await db.select().from(groups).where(and(eq(groups.organizationId, org.id), eq(groups.name, input.reviewerGroupName))).limit(1);
       if (!reviewerGroup) throw new Error("Reviewer group was not created.");
+      const adminName = cleanPersonName("Initial", "Admin");
       const [adminPerson] = await db
         .insert(people)
         .values({
           organizationId: org.id,
           groupId: reviewerGroup.id,
-          firstName: "Initial",
-          lastName: "Admin",
-          normalizedName: normalizedFullName("Initial", "Admin"),
+          firstName: adminName.firstName,
+          lastName: adminName.lastName,
+          normalizedName: normalizedFullName(adminName.firstName, adminName.lastName),
           email: input.firstAdminEmail.toLowerCase(),
           role: "admin",
           passwordEncrypted: encryptedPassword
@@ -281,6 +374,7 @@ export function buildApp() {
       if (!adminPerson) throw new Error("Initial Admin was not created.");
       await createSession(c, adminPerson.id);
       await audit({ action: "setup.completed", targetType: "organization", targetId: org.id });
+      broadcastAdminUpdate("setup.completed", { organizationId: org.id });
       return c.json({ ok: true });
     } catch (error) {
       const e = jsonError(error);
@@ -289,6 +383,11 @@ export function buildApp() {
   });
 
   app.get("/api/session", async (c) => c.json(c.get("session") ?? null));
+
+  app.post("/api/session/logout", async (c) => {
+    await destroySession(c);
+    return c.json({ ok: true });
+  });
 
   app.post("/api/onboarding/lookup", async (c) => {
     try {
@@ -334,10 +433,11 @@ export function buildApp() {
     try {
       const input = registerSchema.parse(await c.req.json());
       const group = await requireGroupAllowed(input.groupId, c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ?? "127.0.0.1");
+      const cleaned = cleanPersonName(input.firstName, input.lastName);
       const existingPeople = await db.select().from(people).where(eq(people.organizationId, group.organizationId));
       const existingPersonMatches = findNameMatches(
-        input.firstName,
-        input.lastName,
+        cleaned.firstName,
+        cleaned.lastName,
         existingPeople.map((person) => ({
           id: person.id,
           firstName: person.firstName,
@@ -350,8 +450,8 @@ export function buildApp() {
         return c.json({ error: "A similar person already exists. Talk to an admin if this is you." }, 409);
       }
       const email = deriveEmail({
-        firstName: input.firstName,
-        lastName: input.lastName,
+        firstName: cleaned.firstName,
+        lastName: cleaned.lastName,
         domain: group.domainSuffix,
         mode: input.emailMode,
         ...(input.customEmail ? { customEmail: input.customEmail } : {})
@@ -366,9 +466,9 @@ export function buildApp() {
         .values({
           organizationId: group.organizationId,
           groupId: group.id,
-          firstName: input.firstName.trim(),
-          lastName: input.lastName.trim(),
-          normalizedName: normalizedFullName(input.firstName, input.lastName),
+          firstName: cleaned.firstName,
+          lastName: cleaned.lastName,
+          normalizedName: normalizedFullName(cleaned.firstName, cleaned.lastName),
           email,
           role: group.accountType,
           passwordEncrypted: group.sharedPasswordEncrypted
@@ -376,6 +476,7 @@ export function buildApp() {
         .returning();
       if (!person) throw new Error("Could not create account.");
       await audit({ action: "person.created", targetType: "person", targetId: person.id, metadata: { groupId: group.id } });
+      broadcastAdminUpdate("person.created", { personId: person.id, groupId: group.id });
       return c.json(await credentialResponse(person.id));
     } catch (error) {
       const e = jsonError(error);
@@ -432,8 +533,9 @@ export function buildApp() {
           mode: "first.last"
         });
       const [grant] = await db.select().from(adminGrants).where(eq(adminGrants.email, email)).limit(1);
-      const firstName = claims.given_name ?? claims.name?.split(" ")[0] ?? email.split("@")[0]!;
-      const lastName = claims.family_name ?? (claims.name?.split(" ").slice(1).join(" ") || "Reviewer");
+      const rawFirstName = claims.given_name ?? claims.name?.split(" ")[0] ?? email.split("@")[0]!;
+      const rawLastName = claims.family_name ?? (claims.name?.split(" ").slice(1).join(" ") || "Reviewer");
+      const cleaned = cleanPersonName(rawFirstName, rawLastName);
 
       let [person] = await db
         .select()
@@ -450,9 +552,9 @@ export function buildApp() {
           .values({
             organizationId: group.organizationId,
             groupId: group.id,
-            firstName,
-            lastName,
-            normalizedName: normalizedFullName(firstName, lastName),
+            firstName: cleaned.firstName,
+            lastName: cleaned.lastName,
+            normalizedName: normalizedFullName(cleaned.firstName, cleaned.lastName),
             email,
             role: grant ? "admin" : "reviewer",
             oidcIssuer: claims.iss,
@@ -474,6 +576,7 @@ export function buildApp() {
       if (!person) throw new Error("Could not create OIDC user.");
       const synced = await createOrSyncCoderUser(person);
       await shareManagedWorkspacesWithReviewer({ ...person, coderUserId: synced.coderUser.id, coderUsername: synced.coderUser.username });
+      broadcastAdminUpdate("person.signed_in", { personId: person.id, groupId: person.groupId });
       await createSession(c, person.id);
       return c.redirect(result.redirectTo);
     } catch (error) {
@@ -549,6 +652,7 @@ export function buildApp() {
         targetType: "group",
         targetId: group?.id ?? null
       });
+      broadcastAdminUpdate("group.saved", { groupId: group?.id });
       return c.json({ group });
     } catch (error) {
       const e = jsonError(error);
@@ -584,6 +688,53 @@ export function buildApp() {
     return c.json({
       people: rows.map((row) => ({ ...safePerson(row.person), groupName: row.groupName, workspaceCount: row.workspaceCount }))
     });
+  });
+
+  app.post("/api/admin/people", async (c) => {
+    const denied = requireAdmin(c);
+    if (denied) return denied;
+    try {
+      const input = adminCreatePersonSchema.parse(await c.req.json());
+      const [group] = await db.select().from(groups).where(eq(groups.id, input.groupId)).limit(1);
+      if (!group) throw new Error("Group not found.");
+      const cleaned = cleanPersonName(input.firstName, input.lastName);
+      const email = deriveEmail({
+        firstName: cleaned.firstName,
+        lastName: cleaned.lastName,
+        domain: group.domainSuffix,
+        mode: input.emailMode,
+        ...(input.customEmail ? { customEmail: input.customEmail } : {})
+      }).toLowerCase();
+      const existingLocal = await db.select().from(people).where(eq(people.email, email)).limit(1);
+      if (existingLocal[0]) return c.json({ error: "That email is already in use." }, 409);
+      const [person] = await db
+        .insert(people)
+        .values({
+          organizationId: group.organizationId,
+          groupId: group.id,
+          firstName: cleaned.firstName,
+          lastName: cleaned.lastName,
+          normalizedName: normalizedFullName(cleaned.firstName, cleaned.lastName),
+          email,
+          role: input.role,
+          passwordEncrypted: group.sharedPasswordEncrypted
+        })
+        .returning();
+      if (!person) throw new Error("Could not create account.");
+      if (input.createInCoderNow) await credentialResponse(person.id);
+      await audit({
+        actorPersonId: (c.get("session") as AppSession | null)?.person?.id ?? null,
+        action: "person.admin_created",
+        targetType: "person",
+        targetId: person.id,
+        metadata: { groupId: group.id, role: input.role }
+      });
+      broadcastAdminUpdate("person.created", { personId: person.id, groupId: group.id });
+      return c.json({ person: safePerson(person) });
+    } catch (error) {
+      const e = jsonError(error);
+      return c.json({ error: e.error }, e.status as 400);
+    }
   });
 
   app.get("/api/admin/workspaces", async (c) => {
@@ -629,6 +780,7 @@ export function buildApp() {
       if (!job) throw new Error("Could not enqueue workspace job.");
       await db.insert(workspaceJobItems).values(input.workspaceIds.map((workspaceRecordId) => ({ jobId: job.id, workspaceRecordId })));
       runWorkspaceJob(job.id).catch(() => undefined);
+      broadcastAdminUpdate("workspace.job.queued", { jobId: job.id, action: input.action });
       return c.json({ job });
     } catch (error) {
       const e = jsonError(error);
@@ -710,6 +862,7 @@ export function buildApp() {
         targetType: "import",
         targetId: preview.id
       });
+      broadcastAdminUpdate("import.confirmed", { importId: preview.id });
       return c.json({ created: toCreate.length, merged: rows.length - toCreate.length });
     } catch (error) {
       const e = jsonError(error);
@@ -729,6 +882,7 @@ export function buildApp() {
         targetType: "person",
         metadata: input
       });
+      broadcastAdminUpdate("people.roles.updated", { count: input.personIds.length, role: input.role });
       return c.json({ ok: true });
     } catch (error) {
       const e = jsonError(error);
@@ -741,14 +895,82 @@ export function buildApp() {
     if (denied) return denied;
     try {
       const input = z.object({ personIds: z.array(z.string().uuid()).min(1) }).parse(await c.req.json());
-      await db.delete(people).where(inArray(people.id, input.personIds));
+      const rows = await db.select().from(people).where(inArray(people.id, input.personIds));
+      for (const person of rows) {
+        await deletePersonEverywhere(person);
+      }
       await audit({
         actorPersonId: (c.get("session") as AppSession | null)?.person?.id ?? null,
         action: "people.deleted",
         targetType: "person",
         metadata: input
       });
-      return c.json({ deleted: input.personIds.length });
+      broadcastAdminUpdate("people.deleted", { count: rows.length });
+      return c.json({ deleted: rows.length });
+    } catch (error) {
+      const e = jsonError(error);
+      return c.json({ error: e.error }, e.status as 400);
+    }
+  });
+
+  app.post("/api/admin/workspaces/create-for-people", async (c) => {
+    const denied = requireAdmin(c);
+    if (denied) return denied;
+    try {
+      const input = z
+        .object({
+          personIds: z.array(z.string().uuid()).min(1),
+          templateId: z.string().min(1),
+          templateName: z.string().optional().default("Template"),
+          name: z.string().min(1).max(48).default("main")
+        })
+        .parse(await c.req.json());
+      const rows = await db.select().from(people).where(inArray(people.id, input.personIds));
+      let created = 0;
+      for (const person of rows) {
+        const [group] = await db.select().from(groups).where(eq(groups.id, person.groupId)).limit(1);
+        if (!group) continue;
+        const { coderUser } = await createOrSyncCoderUser(person);
+        const coderUserRef = coderUser.username ?? coderUser.id;
+        const existing = await coder.getWorkspaceByUserAndName(coderUserRef, input.name);
+        const workspace =
+          existing ??
+          (await coder.createWorkspace({
+            user: coderUserRef,
+            name: input.name,
+            templateId: input.templateId,
+            parameters: group.coderParameters
+          }));
+        await db
+          .insert(workspaceRecords)
+          .values({
+            personId: person.id,
+            groupId: person.groupId,
+            coderWorkspaceId: workspace.id,
+            name: workspace.name,
+            status: workspace.latest_build?.status ?? (existing ? "unknown" : "created"),
+            templateName: workspace.template_display_name ?? workspace.template_name ?? input.templateName
+          })
+          .onConflictDoUpdate({
+            target: workspaceRecords.coderWorkspaceId,
+            set: {
+              personId: person.id,
+              groupId: person.groupId,
+              status: workspace.latest_build?.status ?? "unknown",
+              templateName: workspace.template_display_name ?? workspace.template_name ?? input.templateName,
+              lastSyncedAt: new Date()
+            }
+          });
+        created += existing ? 0 : 1;
+      }
+      await audit({
+        actorPersonId: (c.get("session") as AppSession | null)?.person?.id ?? null,
+        action: "workspaces.created_for_people",
+        targetType: "workspace",
+        metadata: { personIds: input.personIds, templateId: input.templateId, name: input.name, created }
+      });
+      broadcastAdminUpdate("workspaces.created_for_people", { count: rows.length, created });
+      return c.json({ affected: rows.length, created });
     } catch (error) {
       const e = jsonError(error);
       return c.json({ error: e.error }, e.status as 400);
@@ -772,6 +994,7 @@ export function buildApp() {
         await createOrSyncCoderUser(person);
         syncedUsers += 1;
       }
+      broadcastAdminUpdate("coder.synced", { syncedUsers });
       return c.json({ syncedUsers });
     } catch (error) {
       const e = jsonError(error);
