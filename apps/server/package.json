@@ -1,0 +1,23 @@
+{
+  "name": "@coder-onboarding/server",
+  "type": "module",
+  "scripts": {
+    "dev": "bun --hot src/index.ts",
+    "build": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.19.5",
+    "drizzle-orm": "^0.44.7",
+    "hono": "^4.10.4",
+    "jose": "^6.1.0",
+    "postgres": "^3.4.7",
+    "zod": "^4.1.13"
+  },
+  "devDependencies": {
+    "drizzle-kit": "^0.31.7",
+    "typescript": "^5.9.3"
+  }
+}
