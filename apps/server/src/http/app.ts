@@ -574,8 +574,20 @@ export function buildApp() {
           .where(eq(people.id, person.id));
       }
       if (!person) throw new Error("Could not create OIDC user.");
-      const synced = await createOrSyncCoderUser(person);
-      await shareManagedWorkspacesWithReviewer({ ...person, coderUserId: synced.coderUser.id, coderUsername: synced.coderUser.username });
+      try {
+        const synced = await createOrSyncCoderUser(person);
+        await shareManagedWorkspacesWithReviewer({ ...person, coderUserId: synced.coderUser.id, coderUsername: synced.coderUser.username });
+      } catch (syncError) {
+        const isAppAdmin = grant || person.role === "admin";
+        await audit({
+          actorPersonId: person.id,
+          action: "coder.oidc_sync_failed",
+          targetType: "person",
+          targetId: person.id,
+          metadata: { error: syncError instanceof Error ? syncError.message : String(syncError) }
+        });
+        if (!isAppAdmin) throw syncError;
+      }
       broadcastAdminUpdate("person.signed_in", { personId: person.id, groupId: person.groupId });
       await createSession(c, person.id);
       return c.redirect(result.redirectTo);

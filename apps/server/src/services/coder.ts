@@ -108,11 +108,23 @@ export class CoderClient {
   async ensureUser(input: { email: string; password: string; firstName: string; lastName: string; coderUsername?: string | null }) {
     const existing = await this.findUserByEmail(input.email);
     if (existing) return existing;
-    if (input.coderUsername) {
-      const byUsername = await this.getUser(input.coderUsername);
-      if (byUsername) return byUsername;
+    const username = input.coderUsername ?? coderUsernameFromEmail(input.email);
+    const byUsername = await this.getUser(username);
+    if (byUsername) {
+      if (byUsername.email.toLowerCase() === input.email.toLowerCase()) return byUsername;
+      throw new CoderApiError(`Coder username ${username} is already used by another account.`, 409, byUsername);
     }
-    return this.createUser(input);
+    try {
+      return await this.createUser(input);
+    } catch (error) {
+      if (error instanceof CoderApiError && error.status === 409) {
+        const afterConflictByEmail = await this.findUserByEmail(input.email);
+        if (afterConflictByEmail) return afterConflictByEmail;
+        const afterConflictByUsername = await this.getUser(username);
+        if (afterConflictByUsername?.email.toLowerCase() === input.email.toLowerCase()) return afterConflictByUsername;
+      }
+      throw error;
+    }
   }
 
   async listWorkspaces(query?: string) {
