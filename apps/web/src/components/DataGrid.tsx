@@ -11,6 +11,12 @@ export type Column<T> = {
 };
 
 type SortState<T> = { key: keyof T & string; dir: "asc" | "desc" } | null;
+type ContextAction<T> = {
+  label: string;
+  onSelect: (rows: T[]) => void;
+  disabled?: boolean;
+  tone?: "default" | "danger";
+};
 
 export function DataGrid<T extends { id: string }>({
   rows,
@@ -20,7 +26,9 @@ export function DataGrid<T extends { id: string }>({
   externalQuery = "",
   filters = [],
   empty = "No rows yet.",
-  onClearLocalFilters
+  onClearLocalFilters,
+  contextLabel = "Row actions",
+  contextActions
 }: {
   rows: T[];
   columns: Column<T>[];
@@ -30,6 +38,8 @@ export function DataGrid<T extends { id: string }>({
   filters?: { label: string; key: keyof T & string; value: string }[];
   empty?: string;
   onClearLocalFilters?: () => void;
+  contextLabel?: string;
+  contextActions?: (rows: T[]) => ContextAction<T>[];
 }) {
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<SortState<T>>(null);
@@ -77,6 +87,16 @@ export function DataGrid<T extends { id: string }>({
   }, [columns, externalQuery, filterKey, filterValue, filters, query, rows, sort]);
 
   const activeFilterChips = [...filters, ...(filterKey && filterValue ? [{ label: columns.find((column) => column.key === filterKey)?.label ?? filterKey, key: filterKey, value: filterValue }] : [])];
+  const visibleIds = visible.map((row) => row.id);
+  const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selected.includes(id));
+  const someVisibleSelected = visibleIds.some((id) => selected.includes(id));
+  const headerCheckboxRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (headerCheckboxRef.current) {
+      headerCheckboxRef.current.indeterminate = !allVisibleSelected && someVisibleSelected;
+    }
+  }, [allVisibleSelected, someVisibleSelected]);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -120,6 +140,14 @@ export function DataGrid<T extends { id: string }>({
       if (intersects) ids.push(row.dataset.rowId!);
     }
     onSelectedChange(Array.from(new Set(ids)));
+  }
+
+  function toggleVisible() {
+    if (allVisibleSelected) {
+      onSelectedChange(selected.filter((id) => !visibleIds.includes(id)));
+      return;
+    }
+    onSelectedChange(Array.from(new Set([...selected, ...visibleIds])));
   }
 
   return (
@@ -216,7 +244,9 @@ export function DataGrid<T extends { id: string }>({
           </div>
         ) : (
           <div className="grid-row grid-head" style={{ "--grid-cols": columns.length } as React.CSSProperties}>
-            <span className="mobile-check" />
+            <span className="mobile-check">
+              <input ref={headerCheckboxRef} type="checkbox" checked={allVisibleSelected} onChange={toggleVisible} aria-label="Select visible rows" />
+            </span>
             {columns.map((column) => {
               const active = sort?.key === column.key;
               return (
@@ -262,7 +292,12 @@ export function DataGrid<T extends { id: string }>({
           style={{ left: contextMenu.x, top: contextMenu.y }}
           onPointerDown={(event) => event.stopPropagation()}
         >
-          <div className="context-menu-label">Row actions</div>
+          {(() => {
+            const activeRows = selected.includes(contextMenu.row.id) ? rows.filter((row) => selected.includes(row.id)) : [contextMenu.row];
+            const actions = contextActions?.(activeRows) ?? [];
+            return (
+              <>
+                <div className="context-menu-label">{contextLabel}</div>
           <button type="button" onClick={() => { onSelectedChange(Array.from(new Set([...selected, contextMenu.row.id]))); setContextMenu(null); }}>
             <Check size={15} /> Add to selection
           </button>
@@ -272,6 +307,24 @@ export function DataGrid<T extends { id: string }>({
           <button type="button" onClick={() => { onSelectedChange(selected.filter((id) => id !== contextMenu.row.id)); setContextMenu(null); }}>
             <X size={15} /> Remove from selection
           </button>
+                {actions.length ? <div className="context-menu-separator" /> : null}
+                {actions.map((action) => (
+                  <button
+                    key={action.label}
+                    type="button"
+                    className={action.tone === "danger" ? "context-menu-danger" : ""}
+                    disabled={action.disabled}
+                    onClick={() => {
+                      action.onSelect(activeRows);
+                      setContextMenu(null);
+                    }}
+                  >
+                    {action.label}
+                  </button>
+                ))}
+              </>
+            );
+          })()}
         </div>
       ) : null}
     </div>

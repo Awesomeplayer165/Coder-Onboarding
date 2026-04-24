@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, ChevronsUpDown, Command, Download, FileUp, LogOut, Play, RefreshCcw, Save, Search, Settings, Shield, Square, Trash2, UserCircle, UserPlus, Users, Wrench } from "lucide-react";
+import { ArrowLeft, ChevronsUpDown, Command, Copy, Download, ExternalLink, FileUp, LogOut, Pencil, Play, RefreshCcw, Save, Search, Settings, Shield, Square, Trash2, UserCircle, UserPlus, Users, Wrench } from "lucide-react";
 import { api } from "../lib/api";
 import type { PersonRow, PublicGroup, Session, WorkspaceRow } from "../lib/types";
 import { Button } from "../components/ui/Button";
@@ -72,6 +72,20 @@ type WorkspaceActionEntry = {
   error?: string | undefined;
 };
 
+type EditPersonDraft = {
+  id: string;
+  groupId: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+  role: "participant" | "reviewer" | "admin";
+};
+
+type PersonCredentials = {
+  person: { firstName: string; lastName: string; email: string };
+  credentials: { email: string; password: string; coderLoginUrl: string };
+};
+
 function tabFromLocation() {
   const tab = new URLSearchParams(window.location.search).get("tab");
   return tab && ["groups", "people", "workspaces", "sync", "audit"].includes(tab) ? tab : "groups";
@@ -127,8 +141,16 @@ export function AdminPage({ onBack, onSignedOut, currentIp, session }: { onBack:
   const [roleChangeSubmitting, setRoleChangeSubmitting] = useState(false);
   const [deleteEntries, setDeleteEntries] = useState<DeleteEntry[]>([]);
   const [deleteSubmitting, setDeleteSubmitting] = useState(false);
+  const [checkedDeleteWorkspaceIds, setCheckedDeleteWorkspaceIds] = useState<string[]>([]);
+  const [confirmProtectedAdminDelete, setConfirmProtectedAdminDelete] = useState(false);
   const [workspaceActionEntries, setWorkspaceActionEntries] = useState<WorkspaceActionEntry[]>([]);
   const [workspaceActionSubmitting, setWorkspaceActionSubmitting] = useState(false);
+  const [editPersonOpen, setEditPersonOpen] = useState(false);
+  const [editPersonSaving, setEditPersonSaving] = useState(false);
+  const [editPersonDraft, setEditPersonDraft] = useState<EditPersonDraft | null>(null);
+  const [credentialsOpen, setCredentialsOpen] = useState(false);
+  const [credentialsLoading, setCredentialsLoading] = useState(false);
+  const [credentialsData, setCredentialsData] = useState<PersonCredentials | null>(null);
   const [newWorkspace, setNewWorkspace] = useState({ templateId: "", name: "main" });
   const [newPerson, setNewPerson] = useState({
     groupId: "",
@@ -307,6 +329,14 @@ export function AdminPage({ onBack, onSignedOut, currentIp, session }: { onBack:
     () => workspaces.filter((workspace) => selectedWorkspaces.includes(workspace.id)),
     [selectedWorkspaces, workspaces]
   );
+  const protectedDeleteEntries = useMemo(
+    () => deleteEntries.filter((entry) => peopleRows.find((person) => person.id === entry.personId)?.hasAdminGrant),
+    [deleteEntries, peopleRows]
+  );
+  const allDeleteWorkspaceIds = useMemo(
+    () => deleteEntries.flatMap((entry) => entry.workspaces.map((workspace) => workspace.workspaceId)),
+    [deleteEntries]
+  );
 
   async function saveGroup() {
     const body = {
@@ -351,9 +381,9 @@ export function AdminPage({ onBack, onSignedOut, currentIp, session }: { onBack:
     await refresh();
   }
 
-  function prepareRoleChangeEntries(role: "participant" | "reviewer" | "admin") {
+  function prepareRoleChangeEntries(role: "participant" | "reviewer" | "admin", source = selectedPeopleDetails) {
     setRoleChangeEntries(
-      selectedPeopleDetails.map((person) => ({
+      source.map((person) => ({
         personId: person.id,
         name: `${person.firstName} ${person.lastName}`.trim(),
         fromRole: person.role,
@@ -384,21 +414,25 @@ export function AdminPage({ onBack, onSignedOut, currentIp, session }: { onBack:
     }
   }
 
-  function prepareDeleteEntries() {
-    setDeleteEntries(
-      selectedPeopleDetails.map((person) => ({
+  function prepareDeleteEntries(source = selectedPeopleDetails) {
+    const nextEntries =
+      source.map((person) => ({
         personId: person.id,
         name: `${person.firstName} ${person.lastName}`.trim(),
-        status: "pending",
+        status: "pending" as const,
         workspaces: workspaces
           .filter((workspace) => workspace.personEmail === person.email)
           .map((workspace) => ({
             workspaceId: workspace.id,
             coderWorkspaceId: workspace.coderWorkspaceId,
             name: workspace.name,
-            status: "pending"
+            status: "pending" as const
           }))
-      }))
+      }));
+    setCheckedDeleteWorkspaceIds(nextEntries.flatMap((entry) => entry.workspaces.map((workspace) => workspace.workspaceId)));
+    setConfirmProtectedAdminDelete(false);
+    setDeleteEntries(
+      nextEntries
     );
   }
 
@@ -493,6 +527,60 @@ export function AdminPage({ onBack, onSignedOut, currentIp, session }: { onBack:
     } finally {
       setWorkspaceActionSubmitting(false);
     }
+  }
+
+  function openEditPerson(person: PersonRow) {
+    setEditPersonDraft({
+      id: person.id,
+      groupId: person.groupId,
+      firstName: person.firstName,
+      lastName: person.lastName,
+      email: person.email,
+      role: person.role
+    });
+    setEditPersonOpen(true);
+  }
+
+  async function saveEditPerson() {
+    if (!editPersonDraft) return;
+    setEditPersonSaving(true);
+    try {
+      await api(`/api/admin/people/${editPersonDraft.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          groupId: editPersonDraft.groupId,
+          firstName: editPersonDraft.firstName,
+          lastName: editPersonDraft.lastName,
+          role: editPersonDraft.role
+        })
+      });
+      toast({ title: "Account updated", description: `${editPersonDraft.firstName} ${editPersonDraft.lastName}`, tone: "success" });
+      setEditPersonOpen(false);
+      await refresh();
+    } catch (error) {
+      toast({ title: "Could not update account", description: error instanceof Error ? error.message : String(error), tone: "danger" });
+    } finally {
+      setEditPersonSaving(false);
+    }
+  }
+
+  async function openCredentials(person: PersonRow) {
+    setCredentialsOpen(true);
+    setCredentialsLoading(true);
+    try {
+      const result = await api<PersonCredentials>(`/api/admin/people/${person.id}/credentials`);
+      setCredentialsData(result);
+    } catch (error) {
+      toast({ title: "Could not load credentials", description: error instanceof Error ? error.message : String(error), tone: "danger" });
+      setCredentialsOpen(false);
+    } finally {
+      setCredentialsLoading(false);
+    }
+  }
+
+  function copyCredential(value: string) {
+    navigator.clipboard.writeText(value).catch(() => undefined);
+    toast({ title: "Copied", tone: "success" });
   }
 
   function formatDate(value: unknown) {
@@ -614,6 +702,63 @@ export function AdminPage({ onBack, onSignedOut, currentIp, session }: { onBack:
     { key: "targetId", label: "Target ID" },
     { key: "createdAt", label: "When", render: (row) => formatDate(row.createdAt) },
     { key: "metadata", label: "Metadata", render: (row) => <code>{JSON.stringify(row.metadata ?? {})}</code> }
+  ];
+
+  const peopleContextActions = (rows: (PersonRow & { groupType: string })[]) => [
+    { label: "Edit account", onSelect: () => rows[0] && openEditPerson(rows[0]), disabled: rows.length !== 1 },
+    { label: "Show credentials", onSelect: () => rows[0] && void openCredentials(rows[0]), disabled: rows.length !== 1 },
+    {
+      label: "New workspace",
+      onSelect: () => {
+        setSelectedPeople(rows.map((row) => row.id));
+        void loadTemplates().then(() => setCreateWorkspaceDialogOpen(true));
+      }
+    },
+    {
+      label: "Change role",
+      onSelect: () => {
+        setSelectedPeople(rows.map((row) => row.id));
+        prepareRoleChangeEntries(roleToApply, rows);
+        setRoleDialogOpen(true);
+      }
+    },
+    {
+      label: "Delete accounts",
+      tone: "danger" as const,
+      onSelect: () => {
+        setSelectedPeople(rows.map((row) => row.id));
+        prepareDeleteEntries(rows);
+        setDeletePeopleDialogOpen(true);
+      }
+    }
+  ];
+
+  const workspaceContextActions = (rows: WorkspaceRow[]) => [
+    {
+      label: "Start workspace",
+      onSelect: () => {
+        setSelectedWorkspaces(rows.map((row) => row.id));
+        prepareWorkspaceActionEntries("start");
+        setWorkspaceAction("start");
+      }
+    },
+    {
+      label: "Stop workspace",
+      onSelect: () => {
+        setSelectedWorkspaces(rows.map((row) => row.id));
+        prepareWorkspaceActionEntries("stop");
+        setWorkspaceAction("stop");
+      }
+    },
+    {
+      label: "Delete workspace",
+      tone: "danger" as const,
+      onSelect: () => {
+        setSelectedWorkspaces(rows.map((row) => row.id));
+        prepareWorkspaceActionEntries("delete");
+        setWorkspaceAction("delete");
+      }
+    }
   ];
 
   return (
@@ -913,6 +1058,8 @@ export function AdminPage({ onBack, onSignedOut, currentIp, session }: { onBack:
               columns={personColumns}
               selected={selectedPeople}
               onSelectedChange={setSelectedPeople}
+              contextLabel="People actions"
+              contextActions={peopleContextActions}
               externalQuery={tab === "people" ? tableSearch : ""}
               filters={[...activePeopleFilters, ...(tableFilters as { label: string; key: keyof (PersonRow & { groupType: string }) & string; value: string }[])]}
               empty="No matching accounts"
@@ -940,6 +1087,8 @@ export function AdminPage({ onBack, onSignedOut, currentIp, session }: { onBack:
               columns={workspaceColumns}
               selected={selectedWorkspaces}
               onSelectedChange={setSelectedWorkspaces}
+              contextLabel="Workspace actions"
+              contextActions={workspaceContextActions}
               externalQuery={tab === "workspaces" ? tableSearch : ""}
               filters={tableFilters as { label: string; key: keyof WorkspaceRow & string; value: string }[]}
               empty="No matching workspaces"
@@ -1203,13 +1352,42 @@ export function AdminPage({ onBack, onSignedOut, currentIp, session }: { onBack:
       >
         <div className="stack">
           <div className="dialog-top-actions">
+            <label className="check-row">
+              <input
+                type="checkbox"
+                checked={allDeleteWorkspaceIds.length > 0 && checkedDeleteWorkspaceIds.length === allDeleteWorkspaceIds.length}
+                onChange={(event) => setCheckedDeleteWorkspaceIds(event.target.checked ? allDeleteWorkspaceIds : [])}
+              />
+              Check all shown workspaces
+            </label>
             <div className="actions">
               <Button variant="secondary" onClick={() => setDeletePeopleDialogOpen(false)} disabled={deleteSubmitting}>Close</Button>
-              <Button variant="danger" onClick={deletePeople} disabled={deleteSubmitting || deleteEntries.length === 0}>
+              <Button
+                variant="danger"
+                onClick={deletePeople}
+                disabled={
+                  deleteSubmitting ||
+                  deleteEntries.length === 0 ||
+                  checkedDeleteWorkspaceIds.length !== allDeleteWorkspaceIds.length ||
+                  (protectedDeleteEntries.length > 0 && !confirmProtectedAdminDelete)
+                }
+              >
                 Delete accounts
               </Button>
             </div>
           </div>
+          {protectedDeleteEntries.length > 0 ? (
+            <div className="warning-block">
+              <strong>Warning: protected admin selected</strong>
+              <p>
+                {protectedDeleteEntries.map((entry) => entry.name).join(", ")} has an admin grant and may be the initial admin account.
+              </p>
+              <label className="check-row">
+                <input type="checkbox" checked={confirmProtectedAdminDelete} onChange={(event) => setConfirmProtectedAdminDelete(event.target.checked)} />
+                I understand I am deleting a protected admin account.
+              </label>
+            </div>
+          ) : null}
           <div className="batch-list">
             {deleteEntries.map((entry) => (
               <div key={entry.personId} className={`batch-tree status-${entry.status}`}>
@@ -1221,7 +1399,16 @@ export function AdminPage({ onBack, onSignedOut, currentIp, session }: { onBack:
                   {entry.workspaces.length === 0 ? <small>No managed workspaces</small> : null}
                   {entry.workspaces.map((workspace) => (
                     <div key={workspace.workspaceId} className={workspace.status === "deleted" ? "batch-child struck" : "batch-child"}>
-                      <span className="batch-connector" aria-hidden="true" />
+                      <input
+                        className="batch-child-check"
+                        type="checkbox"
+                        checked={checkedDeleteWorkspaceIds.includes(workspace.workspaceId)}
+                        onChange={(event) =>
+                          setCheckedDeleteWorkspaceIds((current) =>
+                            event.target.checked ? Array.from(new Set([...current, workspace.workspaceId])) : current.filter((id) => id !== workspace.workspaceId)
+                          )
+                        }
+                      />
                       <span>{workspace.name}</span>
                       <Badge tone={workspace.status === "failed" ? "danger" : workspace.status === "deleted" ? "success" : "warning"}>{workspace.status}</Badge>
                     </div>
@@ -1267,6 +1454,98 @@ export function AdminPage({ onBack, onSignedOut, currentIp, session }: { onBack:
               </div>
             ))}
           </div>
+        </div>
+      </Dialog>
+
+      <Dialog
+        open={editPersonOpen}
+        onOpenChange={setEditPersonOpen}
+        title="Edit account"
+        description="Update a managed account. Email remains unchanged."
+      >
+        {editPersonDraft ? (
+          <div className="stack">
+            <div className="dialog-top-actions">
+              <div className="actions">
+                <Button variant="secondary" onClick={() => setEditPersonOpen(false)} disabled={editPersonSaving}>Close</Button>
+                <Button onClick={saveEditPerson} disabled={editPersonSaving}>
+                  <Save size={16} /> Save
+                </Button>
+              </div>
+            </div>
+            <div className="two-col">
+              <Field label="First name">
+                <Input value={editPersonDraft.firstName} onChange={(event) => setEditPersonDraft({ ...editPersonDraft, firstName: event.target.value })} />
+              </Field>
+              <Field label="Last name">
+                <Input value={editPersonDraft.lastName} onChange={(event) => setEditPersonDraft({ ...editPersonDraft, lastName: event.target.value })} />
+              </Field>
+            </div>
+            <div className="two-col">
+              <Field label="Group">
+                <select value={editPersonDraft.groupId} onChange={(event) => setEditPersonDraft({ ...editPersonDraft, groupId: event.target.value })}>
+                  {groups.map((group) => (
+                    <option key={group.id} value={group.id}>{group.name}</option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="Role">
+                <select value={editPersonDraft.role} onChange={(event) => setEditPersonDraft({ ...editPersonDraft, role: event.target.value as EditPersonDraft["role"] })}>
+                  <option value="participant">Participant</option>
+                  <option value="reviewer">Reviewer</option>
+                  <option value="admin">Admin</option>
+                </select>
+              </Field>
+            </div>
+            <Field label="Email">
+              <Input value={editPersonDraft.email} disabled />
+            </Field>
+          </div>
+        ) : null}
+      </Dialog>
+
+      <Dialog
+        open={credentialsOpen}
+        onOpenChange={setCredentialsOpen}
+        title="Presentation credentials"
+        description="Display these credentials full-screen style for handoff."
+        className="dialog-wide"
+      >
+        <div className="stack">
+          <div className="dialog-top-actions">
+            <div className="actions">
+              <Button variant="secondary" onClick={() => setCredentialsOpen(false)}>Close</Button>
+            </div>
+          </div>
+          {credentialsLoading ? (
+            <div className="center-screen credentials-present credentials-present-loading">
+              <div className="loader" />
+            </div>
+          ) : credentialsData ? (
+            <div className="credentials-present">
+              <p className="eyebrow">Coder credentials</p>
+              <h1>{credentialsData.person.firstName} {credentialsData.person.lastName}</h1>
+              <div className="credentials-present-box">
+                <span>Email</span>
+                <strong>{credentialsData.credentials.email}</strong>
+                <button type="button" className="icon-button" onClick={() => copyCredential(credentialsData.credentials.email)} aria-label="Copy email">
+                  <Copy size={18} />
+                </button>
+              </div>
+              <div className="credentials-present-box">
+                <span>Password</span>
+                <strong>{credentialsData.credentials.password}</strong>
+                <button type="button" className="icon-button" onClick={() => copyCredential(credentialsData.credentials.password)} aria-label="Copy password">
+                  <Copy size={18} />
+                </button>
+              </div>
+              <div className="actions">
+                <a className="button button-primary" href={credentialsData.credentials.coderLoginUrl} target="_blank" rel="noreferrer">
+                  <ExternalLink size={18} /> Open Coder
+                </a>
+              </div>
+            </div>
+          ) : null}
         </div>
       </Dialog>
       </section>

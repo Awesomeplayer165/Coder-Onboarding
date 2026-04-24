@@ -378,6 +378,13 @@ const adminCreatePersonSchema = z.object({
   createInCoderNow: z.boolean().default(false)
 });
 
+const adminUpdatePersonSchema = z.object({
+  groupId: z.string().uuid(),
+  firstName: z.string().min(1),
+  lastName: z.string().min(1),
+  role: z.enum(["participant", "reviewer", "admin"])
+});
+
 export function buildApp() {
   const app = new Hono();
   app.use("*", attachSession);
@@ -804,16 +811,78 @@ export function buildApp() {
       .select({
         person: people,
         groupName: groups.name,
-        workspaceCount: sql<number>`count(${workspaceRecords.id})`.mapWith(Number)
+        workspaceCount: sql<number>`count(${workspaceRecords.id})`.mapWith(Number),
+        hasAdminGrant: sql<number>`max(case when ${adminGrants.id} is not null then 1 else 0 end)`.mapWith(Number)
       })
       .from(people)
       .leftJoin(groups, eq(groups.id, people.groupId))
+      .leftJoin(adminGrants, eq(adminGrants.email, people.email))
       .leftJoin(workspaceRecords, eq(workspaceRecords.personId, people.id))
       .groupBy(people.id, groups.name)
       .orderBy(people.lastName, people.firstName);
     return c.json({
-      people: rows.map((row) => ({ ...safePerson(row.person), groupName: row.groupName, workspaceCount: row.workspaceCount }))
+      people: rows.map((row) => ({
+        ...safePerson(row.person),
+        groupName: row.groupName,
+        workspaceCount: row.workspaceCount,
+        hasAdminGrant: Boolean(row.hasAdminGrant)
+      }))
     });
+  });
+
+  app.get("/api/admin/people/:id/credentials", async (c) => {
+    const denied = requireAdmin(c);
+    if (denied) return denied;
+    try {
+      return c.json(await credentialResponse(c.req.param("id")));
+    } catch (error) {
+      const e = jsonError(error);
+      return c.json({ error: e.error }, e.status as 400);
+    }
+  });
+
+  app.patch("/api/admin/people/:id", async (c) => {
+    const denied = requireAdmin(c);
+    if (denied) return denied;
+    try {
+      const input = adminUpdatePersonSchema.parse(await c.req.json());
+      const [person] = await db.select().from(people).where(eq(people.id, c.req.param("id"))).limit(1);
+      if (!person) throw new Error("Person not found.");
+      const [group] = await db.select().from(groups).where(eq(groups.id, input.groupId)).limit(1);
+      if (!group) throw new Error("Group not found.");
+      const cleaned = cleanPersonName(input.firstName, input.lastName);
+      const [updated] = await db
+        .update(people)
+        .set({
+          groupId: group.id,
+          firstName: cleaned.firstName,
+          lastName: cleaned.lastName,
+          normalizedName: normalizedFullName(cleaned.firstName, cleaned.lastName),
+          role: input.role,
+          passwordEncrypted: group.sharedPasswordEncrypted,
+          updatedAt: new Date()
+        })
+        .where(eq(people.id, person.id))
+        .returning();
+      if (!updated) throw new Error("Could not update person.");
+      if (updated.groupId !== person.groupId) {
+        await db.update(workspaceRecords).set({ groupId: updated.groupId }).where(eq(workspaceRecords.personId, updated.id));
+      }
+      if (updated.coderUserId || updated.coderUsername) {
+        await createOrSyncCoderUser(updated);
+      }
+      await audit({
+        actorPersonId: (c.get("session") as AppSession | null)?.person?.id ?? null,
+        action: "person.updated",
+        targetType: "person",
+        targetId: updated.id
+      });
+      broadcastAdminUpdate("person.updated", { personId: updated.id });
+      return c.json({ person: safePerson(updated) });
+    } catch (error) {
+      const e = jsonError(error);
+      return c.json({ error: e.error }, e.status as 400);
+    }
   });
 
   app.post("/api/admin/people", async (c) => {

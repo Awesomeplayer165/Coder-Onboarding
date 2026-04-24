@@ -41,6 +41,7 @@ export type PersonRow = {
   workspaceCount?: number;
   coderUsername?: string | null;
   lastLoginAt?: string | null;
+  hasAdminGrant?: boolean;
 };
 
 export type WorkspaceRow = {

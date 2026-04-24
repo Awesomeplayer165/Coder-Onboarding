@@ -7,7 +7,8 @@ export function Dialog({
   title,
   description,
   children,
-  footer
+  footer,
+  className = ""
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -15,6 +16,7 @@ export function Dialog({
   description?: string;
   children: React.ReactNode;
   footer?: React.ReactNode;
+  className?: string;
 }) {
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -28,7 +30,7 @@ export function Dialog({
 
   return (
     <div className="dialog-layer" role="presentation" onMouseDown={() => onOpenChange(false)}>
-      <section className="dialog-content" role="dialog" aria-modal="true" aria-labelledby="dialog-title" onMouseDown={(event) => event.stopPropagation()}>
+      <section className={`dialog-content ${className}`.trim()} role="dialog" aria-modal="true" aria-labelledby="dialog-title" onMouseDown={(event) => event.stopPropagation()}>
         <button className="dialog-close" type="button" onClick={() => onOpenChange(false)} aria-label="Close dialog">
           <X size={16} />
         </button>
