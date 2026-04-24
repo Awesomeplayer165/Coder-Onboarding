@@ -1183,14 +1183,54 @@ select:focus {
 .batch-tree {
   display: grid;
   gap: 8px;
+  position: relative;
 }
 
 .batch-children {
   padding-left: 20px;
+  position: relative;
 }
 
 .batch-child {
   margin-left: 10px;
+  position: relative;
+  padding-left: 34px;
+}
+
+.batch-child::before {
+  content: "";
+  position: absolute;
+  left: -21px;
+  top: -12px;
+  bottom: 50%;
+  width: 0;
+  border-left: 1.5px solid var(--border-strong);
+}
+
+.batch-children::before {
+  content: "";
+  position: absolute;
+  left: 9px;
+  top: -10px;
+  bottom: 18px;
+  width: 0;
+  border-left: 1.5px solid var(--border-strong);
+}
+
+.batch-child:last-child::before {
+  bottom: 50%;
+}
+
+.batch-connector {
+  position: absolute;
+  left: -22px;
+  top: 50%;
+  width: 30px;
+  height: 16px;
+  transform: translateY(-50%);
+  border-left: 1.5px solid var(--border-strong);
+  border-bottom: 1.5px solid var(--border-strong);
+  border-bottom-left-radius: 12px;
 }
 
 .status-pending,

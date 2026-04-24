@@ -167,10 +167,42 @@ async function maybeCreateDefaultWorkspace(person: typeof people.$inferSelect, g
 
 async function syncWorkspaceStatuses(records?: (typeof workspaceRecords.$inferSelect)[]) {
   const localRecords = records ?? (await db.select().from(workspaceRecords));
-  if (localRecords.length === 0) return;
+  const allPeople = await db.select().from(people);
+  const remoteWorkspaces = await coder.listWorkspaces();
+  const localByCoderId = new Map(localRecords.map((record) => [record.coderWorkspaceId, record]));
+  const personByOwner = new Map<string, typeof people.$inferSelect>();
 
-  for (const record of localRecords) {
-    const remote = await coder.getWorkspace(record.coderWorkspaceId);
+  for (const person of allPeople) {
+    for (const key of [person.coderUserId, person.coderUsername, person.email]) {
+      if (key) personByOwner.set(key, person);
+    }
+  }
+
+  for (const remote of remoteWorkspaces) {
+    const owner = (remote.owner_id && personByOwner.get(remote.owner_id)) || (remote.owner_name && personByOwner.get(remote.owner_name));
+    if (!owner) continue;
+    const known = localByCoderId.get(remote.id);
+    const nextValues = {
+      personId: owner.id,
+      groupId: owner.groupId,
+      coderWorkspaceId: remote.id,
+      name: remote.name,
+      status: remote.latest_build?.status ?? known?.status ?? "unknown",
+      templateName: remote.template_display_name ?? remote.template_name ?? known?.templateName ?? null,
+      lastSyncedAt: new Date()
+    };
+
+    if (!known) {
+      const [inserted] = await db.insert(workspaceRecords).values(nextValues).returning();
+      if (inserted) localByCoderId.set(remote.id, inserted);
+      continue;
+    }
+
+    await db.update(workspaceRecords).set(nextValues).where(eq(workspaceRecords.id, known.id));
+  }
+
+  for (const record of localByCoderId.values()) {
+    const remote = remoteWorkspaces.find((workspace) => workspace.id === record.coderWorkspaceId) ?? (await coder.getWorkspace(record.coderWorkspaceId));
     const nextStatus = remote?.latest_build?.status ?? (remote ? record.status : "deleted");
     const nextTemplateName = remote?.template_display_name ?? remote?.template_name ?? record.templateName;
     if (nextStatus !== record.status || nextTemplateName !== record.templateName) {
@@ -196,7 +228,11 @@ async function deletePersonEverywhere(
   onProgress?: (event: { stage: string; workspaceId?: string | undefined; workspaceName?: string | undefined }) => Promise<void> | void
 ) {
   const localWorkspaces = await db.select().from(workspaceRecords).where(eq(workspaceRecords.personId, person.id));
-  const coderWorkspaces = person.coderUsername ? await coder.listWorkspaces(person.coderUsername).catch(() => []) : [];
+  const coderUser = (person.coderUserId || person.coderUsername ? await coder.getUser(person.coderUserId ?? person.coderUsername ?? person.email).catch(() => null) : null)
+    ?? (await coder.findUserByEmail(person.email).catch(() => null));
+  const ownerQueries = Array.from(new Set([coderUser?.username, coderUser?.id, person.coderUsername, person.coderUserId].filter(Boolean)));
+  const remoteWorkspaceLists = await Promise.all(ownerQueries.map((owner) => coder.listWorkspaces(`owner:${owner}`).catch(() => [])));
+  const coderWorkspaces = remoteWorkspaceLists.flat();
   const workspaceIds = new Set(localWorkspaces.map((workspace) => workspace.coderWorkspaceId));
   const workspaceNames = new Map(localWorkspaces.map((workspace) => [workspace.coderWorkspaceId, workspace.name]));
   for (const workspace of coderWorkspaces) {
@@ -219,10 +255,26 @@ async function deletePersonEverywhere(
     await onProgress?.({ stage: "workspace_deleted", workspaceId, workspaceName: workspaceNames.get(workspaceId) });
   }
 
-  const coderIdentifier = person.coderUserId ?? person.coderUsername ?? person.email;
+  const coderIdentifier = coderUser?.id ?? person.coderUserId ?? person.coderUsername ?? person.email;
   if (coderIdentifier) {
     await onProgress?.({ stage: "user_deleting" });
     await coder.deleteUser(coderIdentifier).catch(async (error) => {
+      if (error instanceof Error && /417/.test(error.message)) {
+        const retryWorkspaceLists = await Promise.all(ownerQueries.map((owner) => coder.listWorkspaces(`owner:${owner}`).catch(() => [])));
+        const retryWorkspaces = retryWorkspaceLists.flat();
+        for (const workspace of retryWorkspaces) {
+          if (!workspaceIds.has(workspace.id)) {
+            workspaceIds.add(workspace.id);
+            workspaceNames.set(workspace.id, workspace.name);
+            await onProgress?.({ stage: "workspace_deleting", workspaceId: workspace.id, workspaceName: workspace.name });
+            await coder.createWorkspaceBuild(workspace.id, "delete");
+            await waitForWorkspaceDeletion(workspace.id);
+            await onProgress?.({ stage: "workspace_deleted", workspaceId: workspace.id, workspaceName: workspace.name });
+          }
+        }
+        await coder.deleteUser(coderIdentifier);
+        return;
+      }
       if (person.coderUsername && person.coderUsername !== coderIdentifier) {
         await coder.deleteUser(person.coderUsername);
         return;

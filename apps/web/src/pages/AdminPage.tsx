@@ -1221,7 +1221,8 @@ export function AdminPage({ onBack, onSignedOut, currentIp, session }: { onBack:
                   {entry.workspaces.length === 0 ? <small>No managed workspaces</small> : null}
                   {entry.workspaces.map((workspace) => (
                     <div key={workspace.workspaceId} className={workspace.status === "deleted" ? "batch-child struck" : "batch-child"}>
-                      <span>&darr; &rarr; {workspace.name}</span>
+                      <span className="batch-connector" aria-hidden="true" />
+                      <span>{workspace.name}</span>
                       <Badge tone={workspace.status === "failed" ? "danger" : workspace.status === "deleted" ? "success" : "warning"}>{workspace.status}</Badge>
                     </div>
                   ))}
