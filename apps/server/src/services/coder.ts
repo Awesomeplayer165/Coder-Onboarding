@@ -7,6 +7,7 @@ export type CoderUser = {
   username: string;
   name?: string;
   last_seen_at?: string | null;
+  roles?: { name: string; display_name?: string; organization_id?: string | null }[];
 };
 
 export type CoderTemplate = {
@@ -88,6 +89,10 @@ export class CoderClient {
     }
   }
 
+  async getUserRoles(user: string) {
+    return this.request<CoderUser>(`/users/${encodeURIComponent(user)}/roles`);
+  }
+
   private buildUsernameCandidate(base: string, attempt: number) {
     if (attempt === 0) return base;
     const suffix = `-${attempt + 1}`;
@@ -114,6 +119,13 @@ export class CoderClient {
     return this.request<CoderUser>(`/users/${encodeURIComponent(user)}/profile`, {
       method: "PUT",
       body: JSON.stringify(input)
+    });
+  }
+
+  async updateUserRoles(user: string, roles: string[]) {
+    return this.request<CoderUser>(`/users/${encodeURIComponent(user)}/roles`, {
+      method: "PUT",
+      body: JSON.stringify({ roles })
     });
   }
 
@@ -164,6 +176,15 @@ export class CoderClient {
     const suffix = query ? `?q=${encodeURIComponent(query)}` : "";
     const result = await this.request<{ workspaces: CoderWorkspace[] } | CoderWorkspace[]>(`/workspaces${suffix}`);
     return Array.isArray(result) ? result : result.workspaces;
+  }
+
+  async getWorkspace(workspaceId: string) {
+    try {
+      return await this.request<CoderWorkspace>(`/workspaces/${encodeURIComponent(workspaceId)}`);
+    } catch (error) {
+      if (error instanceof CoderApiError && error.status === 404) return null;
+      throw error;
+    }
   }
 
   async getWorkspaceByUserAndName(user: string, workspaceName: string) {

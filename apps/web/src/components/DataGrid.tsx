@@ -19,7 +19,8 @@ export function DataGrid<T extends { id: string }>({
   onSelectedChange,
   externalQuery = "",
   filters = [],
-  empty = "No rows yet."
+  empty = "No rows yet.",
+  onClearLocalFilters
 }: {
   rows: T[];
   columns: Column<T>[];
@@ -28,6 +29,7 @@ export function DataGrid<T extends { id: string }>({
   externalQuery?: string;
   filters?: { label: string; key: keyof T & string; value: string }[];
   empty?: string;
+  onClearLocalFilters?: () => void;
 }) {
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<SortState<T>>(null);
@@ -161,6 +163,7 @@ export function DataGrid<T extends { id: string }>({
               setFilterKey("");
               setFilterValue("");
               setQuery("");
+              onClearLocalFilters?.();
             }}
           >
             Clear local filters

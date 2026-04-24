@@ -47,15 +47,10 @@ export function HomePage({
           <h1>{bootstrap.session?.person ? `Hello, ${bootstrap.session.person.firstName}` : "Choose your group"}</h1>
           <p>Get your Coder credentials, copy them cleanly, and open the Coder login page.</p>
         </div>
-        {bootstrap.session?.person ? (
+        {bootstrap.session?.person?.isAdmin ? (
           <div className="topbar-actions">
-            {bootstrap.session.person.isAdmin ? (
-              <Button variant="secondary" onClick={onAdmin}>
-                <Settings size={16} /> Admin
-              </Button>
-            ) : null}
-            <Button variant="secondary" onClick={signOut}>
-              <LogOut size={16} /> Sign out
+            <Button variant="secondary" onClick={onAdmin}>
+              <Settings size={16} /> Admin
             </Button>
           </div>
         ) : null}

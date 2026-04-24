@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, ChevronsUpDown, Command, Download, FileUp, LogOut, Play, RefreshCcw, Save, Search, Settings, Shield, Square, Trash2, UserCircle, UserPlus, Users, Wrench } from "lucide-react";
 import { api } from "../lib/api";
 import type { PersonRow, PublicGroup, Session, WorkspaceRow } from "../lib/types";
@@ -38,6 +38,45 @@ type AdminGroup = PublicGroup & {
   oidcConfig: AdminOidcConfig | null;
 };
 
+type RoleChangeEntry = {
+  personId: string;
+  name: string;
+  fromRole: "participant" | "reviewer" | "admin";
+  toRole: "participant" | "reviewer" | "admin";
+  status: "pending" | "syncing" | "done" | "failed";
+  error?: string | undefined;
+};
+
+type DeleteWorkspaceEntry = {
+  workspaceId: string;
+  coderWorkspaceId?: string;
+  name: string;
+  status: "pending" | "deleting" | "deleted" | "failed";
+  error?: string | undefined;
+};
+
+type DeleteEntry = {
+  personId: string;
+  name: string;
+  status: "pending" | "workspace_deleting" | "workspace_deleted" | "user_deleting" | "done" | "failed";
+  workspaces: DeleteWorkspaceEntry[];
+  error?: string | undefined;
+};
+
+type WorkspaceActionEntry = {
+  workspaceRecordId: string;
+  name: string;
+  owner: string;
+  action: "start" | "stop" | "delete";
+  status: "pending" | "running" | "done" | "failed";
+  error?: string | undefined;
+};
+
+function tabFromLocation() {
+  const tab = new URLSearchParams(window.location.search).get("tab");
+  return tab && ["groups", "people", "workspaces", "sync", "audit"].includes(tab) ? tab : "groups";
+}
+
 function blankGroup(): AdminGroup {
   return {
     id: "",
@@ -57,7 +96,7 @@ function blankGroup(): AdminGroup {
 
 export function AdminPage({ onBack, onSignedOut, currentIp, session }: { onBack: () => void; onSignedOut: () => void; currentIp: string; session: Session }) {
   const toast = useToast();
-  const [tab, setTab] = useState("groups");
+  const [tab, setTab] = useState(tabFromLocation);
   const [tableSearch, setTableSearch] = useState("");
   const [tableFilters, setTableFilters] = useState<{ label: string; key: string; value: string }[]>([]);
   const [groups, setGroups] = useState<AdminGroup[]>([]);
@@ -81,8 +120,15 @@ export function AdminPage({ onBack, onSignedOut, currentIp, session }: { onBack:
   const [importPreview, setImportPreview] = useState<{ importId: string; rows: Record<string, unknown>[]; conflictCount: number } | null>(null);
   const [audit, setAudit] = useState<Record<string, unknown>[]>([]);
   const [loading, setLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [peopleRoleFilter, setPeopleRoleFilter] = useState("");
   const [peopleGroupTypeFilter, setPeopleGroupTypeFilter] = useState("");
+  const [roleChangeEntries, setRoleChangeEntries] = useState<RoleChangeEntry[]>([]);
+  const [roleChangeSubmitting, setRoleChangeSubmitting] = useState(false);
+  const [deleteEntries, setDeleteEntries] = useState<DeleteEntry[]>([]);
+  const [deleteSubmitting, setDeleteSubmitting] = useState(false);
+  const [workspaceActionEntries, setWorkspaceActionEntries] = useState<WorkspaceActionEntry[]>([]);
+  const [workspaceActionSubmitting, setWorkspaceActionSubmitting] = useState(false);
   const [newWorkspace, setNewWorkspace] = useState({ templateId: "", name: "main" });
   const [newPerson, setNewPerson] = useState({
     groupId: "",
@@ -93,34 +139,130 @@ export function AdminPage({ onBack, onSignedOut, currentIp, session }: { onBack:
     customEmail: "",
     createInCoderNow: false
   });
+  const refreshTimer = useRef<number | null>(null);
+
+  function updateUrlTab(nextTab: string) {
+    const url = new URL(window.location.href);
+    url.searchParams.set("tab", nextTab);
+    window.history.replaceState({}, "", `${url.pathname}${url.search}`);
+  }
+
+  function openTab(nextTab: string) {
+    setTab(nextTab);
+    updateUrlTab(nextTab);
+  }
 
   async function refresh(preferredGroupId = editing.id) {
-    const [groupData, peopleData, workspaceData] = await Promise.all([
-      api<{ groups: AdminGroup[] }>("/api/admin/groups"),
-      api<{ people: PersonRow[] }>("/api/admin/people"),
-      api<{ workspaces: WorkspaceRow[] }>("/api/admin/workspaces")
-    ]);
-    setGroups(groupData.groups);
-    setPeople(peopleData.people);
-    setWorkspaces(workspaceData.workspaces);
-    const nextEditing = groupData.groups.find((group) => group.id === preferredGroupId) ?? groupData.groups[0] ?? blankGroup();
-    setEditing(nextEditing);
-    setNewPerson((current) => ({ ...current, groupId: current.groupId || nextEditing.id }));
-    setLoading(false);
+    setIsRefreshing(true);
+    try {
+      const [groupData, peopleData, workspaceData] = await Promise.all([
+        api<{ groups: AdminGroup[] }>("/api/admin/groups"),
+        api<{ people: PersonRow[] }>("/api/admin/people"),
+        api<{ workspaces: WorkspaceRow[] }>("/api/admin/workspaces")
+      ]);
+      setGroups(groupData.groups);
+      setPeople(peopleData.people);
+      setWorkspaces(workspaceData.workspaces);
+      const nextEditing = groupData.groups.find((group) => group.id === preferredGroupId) ?? groupData.groups[0] ?? blankGroup();
+      setEditing(nextEditing);
+      setNewPerson((current) => ({ ...current, groupId: current.groupId || nextEditing.id }));
+      setLoading(false);
+    } finally {
+      setIsRefreshing(false);
+    }
   }
 
   useEffect(() => {
     refresh("").catch((error) => toast({ title: "Admin data failed to load", description: error instanceof Error ? error.message : String(error), tone: "danger" }));
+  }, [toast]);
+
+  useEffect(() => {
+    function onPopState() {
+      setTab(tabFromLocation());
+    }
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
   }, []);
 
   useEffect(() => {
     const events = new EventSource("/api/admin/live");
-    events.onmessage = () => {
-      if (!isEditingGroup) {
-        refresh(editing.id).catch(() => undefined);
+    events.onmessage = (event) => {
+      const payload = JSON.parse(event.data) as { type?: string; kind?: string; payload?: Record<string, unknown> };
+      const kind = payload.kind;
+      const data = payload.payload ?? {};
+
+      if (kind === "people.roles.progress") {
+        setRoleChangeEntries((current) =>
+          current.map((entry) =>
+            entry.personId === data.personId
+              ? {
+                  ...entry,
+                  status: data.stage === "done" ? "done" : data.stage === "failed" ? "failed" : "syncing",
+                  error: typeof data.error === "string" ? data.error : entry.error
+                }
+              : entry
+          )
+        );
       }
+
+      if (kind === "people.delete.progress") {
+        setDeleteEntries((current) =>
+          current.map((entry) => {
+            if (entry.personId !== data.personId) return entry;
+            const next = { ...entry };
+            if (typeof data.workspaceId === "string") {
+              next.workspaces = entry.workspaces.map((workspace) =>
+                workspace.coderWorkspaceId === data.workspaceId || workspace.workspaceId === data.workspaceId
+                  ? {
+                      ...workspace,
+                      status:
+                        data.stage === "workspace_deleted" ? "deleted" : data.stage === "failed" ? "failed" : "deleting",
+                      error: typeof data.error === "string" ? data.error : workspace.error
+                    }
+                  : workspace
+              );
+            }
+            next.status =
+              data.stage === "user_deleted"
+                ? "done"
+                : data.stage === "user_deleting"
+                  ? "user_deleting"
+                  : data.stage === "workspace_deleted"
+                    ? "workspace_deleted"
+                    : data.stage === "failed"
+                      ? "failed"
+                      : "workspace_deleting";
+            next.error = typeof data.error === "string" ? data.error : next.error;
+            return next;
+          })
+        );
+      }
+
+      if (kind === "workspace.job.progress") {
+        setWorkspaceActionEntries((current) =>
+          current.map((entry) =>
+            entry.workspaceRecordId === data.workspaceRecordId
+              ? {
+                  ...entry,
+                  status: data.stage === "done" ? "done" : data.stage === "failed" ? "failed" : "running",
+                  error: typeof data.error === "string" ? data.error : entry.error
+                }
+              : entry
+          )
+        );
+      }
+
+      if (refreshTimer.current) window.clearTimeout(refreshTimer.current);
+      refreshTimer.current = window.setTimeout(() => {
+        if (!isEditingGroup) {
+          refresh(editing.id).catch(() => undefined);
+        }
+      }, 200);
     };
-    return () => events.close();
+    return () => {
+      if (refreshTimer.current) window.clearTimeout(refreshTimer.current);
+      events.close();
+    };
   }, [editing.id, isEditingGroup]);
 
   useEffect(() => {
@@ -134,6 +276,12 @@ export function AdminPage({ onBack, onSignedOut, currentIp, session }: { onBack:
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
+
+  useEffect(() => {
+    if (tab === "audit") {
+      loadAudit().catch(() => undefined);
+    }
+  }, [tab]);
 
   const selectedPeopleCount = selectedPeople.length;
   const selectedWorkspaceCount = selectedWorkspaces.length;
@@ -151,6 +299,14 @@ export function AdminPage({ onBack, onSignedOut, currentIp, session }: { onBack:
     if (peopleGroupTypeFilter) filters.push({ label: "Group type", key: "groupType", value: peopleGroupTypeFilter });
     return filters;
   }, [peopleGroupTypeFilter, peopleRoleFilter]);
+  const selectedPeopleDetails = useMemo(
+    () => peopleRows.filter((person) => selectedPeople.includes(person.id)),
+    [peopleRows, selectedPeople]
+  );
+  const selectedWorkspaceDetails = useMemo(
+    () => workspaces.filter((workspace) => selectedWorkspaces.includes(workspace.id)),
+    [selectedWorkspaces, workspaces]
+  );
 
   async function saveGroup() {
     const body = {
@@ -195,17 +351,72 @@ export function AdminPage({ onBack, onSignedOut, currentIp, session }: { onBack:
     await refresh();
   }
 
+  function prepareRoleChangeEntries(role: "participant" | "reviewer" | "admin") {
+    setRoleChangeEntries(
+      selectedPeopleDetails.map((person) => ({
+        personId: person.id,
+        name: `${person.firstName} ${person.lastName}`.trim(),
+        fromRole: person.role,
+        toRole: role,
+        status: "pending"
+      }))
+    );
+  }
+
   async function updatePeopleRole(role: "participant" | "reviewer" | "admin") {
-    await api("/api/admin/people/roles", { method: "POST", body: JSON.stringify({ personIds: selectedPeople, role }) });
-    toast({ title: "Roles updated", description: `${selectedPeople.length} account${selectedPeople.length === 1 ? "" : "s"} changed.`, tone: "success" });
-    await refresh();
+    setRoleChangeSubmitting(true);
+    try {
+      const result = await api<{ ok: true; updates: { personId: string; name: string; fromRole: "participant" | "reviewer" | "admin"; toRole: "participant" | "reviewer" | "admin" }[] }>(
+        "/api/admin/people/roles",
+        { method: "POST", body: JSON.stringify({ personIds: selectedPeople, role }) }
+      );
+      setRoleChangeEntries((current) =>
+        current.map((entry) => (result.updates.some((update) => update.personId === entry.personId) ? { ...entry, status: "done" } : entry))
+      );
+      toast({ title: "Roles updated", description: `${selectedPeople.length} account${selectedPeople.length === 1 ? "" : "s"} changed.`, tone: "success" });
+      await refresh();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setRoleChangeEntries((current) => current.map((entry) => (entry.status === "done" ? entry : { ...entry, status: "failed", error: message })));
+      toast({ title: "Could not update roles", description: message, tone: "danger" });
+    } finally {
+      setRoleChangeSubmitting(false);
+    }
+  }
+
+  function prepareDeleteEntries() {
+    setDeleteEntries(
+      selectedPeopleDetails.map((person) => ({
+        personId: person.id,
+        name: `${person.firstName} ${person.lastName}`.trim(),
+        status: "pending",
+        workspaces: workspaces
+          .filter((workspace) => workspace.personEmail === person.email)
+          .map((workspace) => ({
+            workspaceId: workspace.id,
+            coderWorkspaceId: workspace.coderWorkspaceId,
+            name: workspace.name,
+            status: "pending"
+          }))
+      }))
+    );
   }
 
   async function deletePeople() {
-    await api("/api/admin/people/delete", { method: "POST", body: JSON.stringify({ personIds: selectedPeople }) });
-    setSelectedPeople([]);
-    toast({ title: "Accounts removed", description: "Coder workspaces were queued for deletion first.", tone: "success" });
-    await refresh();
+    setDeleteSubmitting(true);
+    try {
+      await api("/api/admin/people/delete", { method: "POST", body: JSON.stringify({ personIds: selectedPeople }) });
+      setSelectedPeople([]);
+      setDeleteEntries((current) => current.map((entry) => ({ ...entry, status: "done", workspaces: entry.workspaces.map((workspace) => ({ ...workspace, status: "deleted" })) })));
+      toast({ title: "Accounts removed", description: "Coder workspaces were deleted before the user accounts were removed.", tone: "success" });
+      await refresh();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setDeleteEntries((current) => current.map((entry) => ({ ...entry, status: "failed", error: message })));
+      toast({ title: "Could not delete accounts", description: message, tone: "danger" });
+    } finally {
+      setDeleteSubmitting(false);
+    }
   }
 
   async function createPerson() {
@@ -258,6 +469,32 @@ export function AdminPage({ onBack, onSignedOut, currentIp, session }: { onBack:
     setEditing(next);
   }
 
+  function prepareWorkspaceActionEntries(action: "start" | "stop" | "delete") {
+    setWorkspaceActionEntries(
+      selectedWorkspaceDetails.map((workspace) => ({
+        workspaceRecordId: workspace.id,
+        name: workspace.name,
+        owner: workspace.personName ?? workspace.personEmail ?? "No owner",
+        action,
+        status: "pending"
+      }))
+    );
+  }
+
+  async function runWorkspaceAction(action: "start" | "stop" | "delete") {
+    setWorkspaceActionSubmitting(true);
+    try {
+      await batch(action);
+      setWorkspaceActionEntries((current) => current.map((entry) => ({ ...entry, status: "running" })));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setWorkspaceActionEntries((current) => current.map((entry) => ({ ...entry, status: "failed", error: message })));
+      toast({ title: "Could not queue workspace action", description: message, tone: "danger" });
+    } finally {
+      setWorkspaceActionSubmitting(false);
+    }
+  }
+
   function formatDate(value: unknown) {
     if (!value) return "Never";
     return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(String(value)));
@@ -273,13 +510,13 @@ export function AdminPage({ onBack, onSignedOut, currentIp, session }: { onBack:
   ];
 
   const commandItems = useMemo(() => {
-    const pages = navItems.map((item) => ({ type: "Page", label: item.label, detail: "Go to section", action: () => { setTab(item.id); setTableSearch(""); setTableFilters([]); } }));
+    const pages = navItems.map((item) => ({ type: "Page", label: item.label, detail: "Go to section", action: () => { openTab(item.id); setTableSearch(""); setTableFilters([]); } }));
     const groupItems = groups.map((group) => ({
       type: "Group",
       label: group.name,
       detail: group.domainSuffix,
       action: () => {
-        setTab("groups");
+        openTab("groups");
         setEditing(group);
         setTableSearch(group.name);
       }
@@ -289,7 +526,7 @@ export function AdminPage({ onBack, onSignedOut, currentIp, session }: { onBack:
       label: `${person.firstName} ${person.lastName}`,
       detail: person.email,
       action: () => {
-        setTab("people");
+        openTab("people");
         setTableSearch(person.email);
       }
     }));
@@ -298,7 +535,7 @@ export function AdminPage({ onBack, onSignedOut, currentIp, session }: { onBack:
       label: workspace.name,
       detail: workspace.personEmail ?? workspace.groupName ?? "",
       action: () => {
-        setTab("workspaces");
+        openTab("workspaces");
         setTableSearch(workspace.name);
       }
     }));
@@ -393,7 +630,7 @@ export function AdminPage({ onBack, onSignedOut, currentIp, session }: { onBack:
               type="button"
               className={tab === item.id ? "sidebar-item active" : "sidebar-item"}
               onClick={() => {
-                setTab(item.id);
+                openTab(item.id);
                 if (item.id === "audit") loadAudit().catch(() => undefined);
               }}
             >
@@ -448,7 +685,7 @@ export function AdminPage({ onBack, onSignedOut, currentIp, session }: { onBack:
               Search users, workspaces, groups...
               <span><Kbd>{isMac ? "⌘" : "Ctrl"}</Kbd><Kbd>K</Kbd></span>
             </button>
-            <Button variant="secondary" onClick={() => refresh(editing.id)}>
+            <Button variant="secondary" onClick={() => refresh(editing.id)} disabled={isRefreshing}>
               <RefreshCcw size={16} /> Refresh
             </Button>
           </div>
@@ -647,8 +884,26 @@ export function AdminPage({ onBack, onSignedOut, currentIp, session }: { onBack:
             >
               <Play size={16} /> New workspace
             </Button>
-            <Button variant="secondary" disabled={selectedPeopleCount === 0} onClick={() => setRoleDialogOpen(true)}><Shield size={16} /> Change role</Button>
-            <Button variant="danger" disabled={selectedPeopleCount === 0} onClick={() => setDeletePeopleDialogOpen(true)}><Trash2 size={16} /> Delete</Button>
+            <Button
+              variant="secondary"
+              disabled={selectedPeopleCount === 0}
+              onClick={() => {
+                prepareRoleChangeEntries(roleToApply);
+                setRoleDialogOpen(true);
+              }}
+            >
+              <Shield size={16} /> Change role
+            </Button>
+            <Button
+              variant="danger"
+              disabled={selectedPeopleCount === 0}
+              onClick={() => {
+                prepareDeleteEntries();
+                setDeletePeopleDialogOpen(true);
+              }}
+            >
+              <Trash2 size={16} /> Delete
+            </Button>
           </div>
           {loading ? <TableSkeleton /> : people.length === 0 ? (
             <Empty title="No accounts yet" description="Create an account or import a CSV from Sync." />
@@ -661,6 +916,10 @@ export function AdminPage({ onBack, onSignedOut, currentIp, session }: { onBack:
               externalQuery={tab === "people" ? tableSearch : ""}
               filters={[...activePeopleFilters, ...(tableFilters as { label: string; key: keyof (PersonRow & { groupType: string }) & string; value: string }[])]}
               empty="No matching accounts"
+              onClearLocalFilters={() => {
+                setTableSearch("");
+                setTableFilters([]);
+              }}
             />
           )}
         </div>
@@ -669,9 +928,9 @@ export function AdminPage({ onBack, onSignedOut, currentIp, session }: { onBack:
         <div className="panel">
           <div className="section-toolbar">
             <span className="selection-pill">{selectedWorkspaceCount} selected</span>
-            <Button variant="secondary" disabled={selectedWorkspaceCount === 0} onClick={() => setWorkspaceAction("start")}><Play size={16} /> Start</Button>
-            <Button variant="secondary" disabled={selectedWorkspaceCount === 0} onClick={() => setWorkspaceAction("stop")}><Square size={16} /> Stop</Button>
-            <Button variant="danger" disabled={selectedWorkspaceCount === 0} onClick={() => setWorkspaceAction("delete")}><Trash2 size={16} /> Delete</Button>
+            <Button variant="secondary" disabled={selectedWorkspaceCount === 0} onClick={() => { prepareWorkspaceActionEntries("start"); setWorkspaceAction("start"); }}><Play size={16} /> Start</Button>
+            <Button variant="secondary" disabled={selectedWorkspaceCount === 0} onClick={() => { prepareWorkspaceActionEntries("stop"); setWorkspaceAction("stop"); }}><Square size={16} /> Stop</Button>
+            <Button variant="danger" disabled={selectedWorkspaceCount === 0} onClick={() => { prepareWorkspaceActionEntries("delete"); setWorkspaceAction("delete"); }}><Trash2 size={16} /> Delete</Button>
           </div>
           {loading ? <TableSkeleton /> : workspaces.length === 0 ? (
             <Empty title="No workspaces yet" description="Managed Coder workspaces will appear here after accounts are created or synced." />
@@ -684,6 +943,10 @@ export function AdminPage({ onBack, onSignedOut, currentIp, session }: { onBack:
               externalQuery={tab === "workspaces" ? tableSearch : ""}
               filters={tableFilters as { label: string; key: keyof WorkspaceRow & string; value: string }[]}
               empty="No matching workspaces"
+              onClearLocalFilters={() => {
+                setTableSearch("");
+                setTableFilters([]);
+              }}
             />
           )}
         </div>
@@ -739,6 +1002,10 @@ export function AdminPage({ onBack, onSignedOut, currentIp, session }: { onBack:
               externalQuery={tab === "audit" ? tableSearch : ""}
               filters={tableFilters as { label: string; key: string; value: string }[]}
               empty="No matching audit events"
+              onClearLocalFilters={() => {
+                setTableSearch("");
+                setTableFilters([]);
+              }}
             />
           )}
         </div>
@@ -899,27 +1166,33 @@ export function AdminPage({ onBack, onSignedOut, currentIp, session }: { onBack:
         onOpenChange={setRoleDialogOpen}
         title="Change selected roles"
         description={`${selectedPeopleCount} account${selectedPeopleCount === 1 ? "" : "s"} selected.`}
-        footer={
-          <>
-            <Button variant="secondary" onClick={() => setRoleDialogOpen(false)}>Cancel</Button>
-            <Button
-              onClick={async () => {
-                await updatePeopleRole(roleToApply);
-                setRoleDialogOpen(false);
-              }}
-            >
-              Apply role
-            </Button>
-          </>
-        }
       >
-        <Field label="Role">
-          <select value={roleToApply} onChange={(event) => setRoleToApply(event.target.value as typeof roleToApply)}>
-            <option value="participant">Participant</option>
-            <option value="reviewer">Reviewer</option>
-            <option value="admin">Admin</option>
-          </select>
-        </Field>
+        <div className="stack">
+          <div className="dialog-top-actions">
+            <Field label="Role">
+              <select value={roleToApply} onChange={(event) => { const nextRole = event.target.value as typeof roleToApply; setRoleToApply(nextRole); prepareRoleChangeEntries(nextRole); }}>
+                <option value="participant">Participant</option>
+                <option value="reviewer">Reviewer</option>
+                <option value="admin">Admin</option>
+              </select>
+            </Field>
+            <div className="actions">
+              <Button variant="secondary" onClick={() => setRoleDialogOpen(false)} disabled={roleChangeSubmitting}>Close</Button>
+              <Button onClick={() => updatePeopleRole(roleToApply)} disabled={roleChangeSubmitting || roleChangeEntries.length === 0}>
+                Apply role
+              </Button>
+            </div>
+          </div>
+          <div className="batch-list">
+            {roleChangeEntries.map((entry) => (
+              <div key={entry.personId} className={`batch-row status-${entry.status}`}>
+                <span>{entry.name}</span>
+                <strong>&rarr; {entry.toRole}</strong>
+                <Badge tone={entry.status === "failed" ? "danger" : entry.status === "done" ? "success" : "warning"}>{entry.status}</Badge>
+              </div>
+            ))}
+          </div>
+        </div>
       </Dialog>
 
       <Dialog
@@ -927,22 +1200,36 @@ export function AdminPage({ onBack, onSignedOut, currentIp, session }: { onBack:
         onOpenChange={setDeletePeopleDialogOpen}
         title="Delete selected accounts"
         description="This queues deletion for owned Coder workspaces before deleting the Coder users and local accounts."
-        footer={
-          <>
-            <Button variant="secondary" onClick={() => setDeletePeopleDialogOpen(false)}>Cancel</Button>
-            <Button
-              variant="danger"
-              onClick={async () => {
-                await deletePeople();
-                setDeletePeopleDialogOpen(false);
-              }}
-            >
-              Delete accounts
-            </Button>
-          </>
-        }
       >
-        <p>{selectedPeopleCount} account{selectedPeopleCount === 1 ? "" : "s"} selected.</p>
+        <div className="stack">
+          <div className="dialog-top-actions">
+            <div className="actions">
+              <Button variant="secondary" onClick={() => setDeletePeopleDialogOpen(false)} disabled={deleteSubmitting}>Close</Button>
+              <Button variant="danger" onClick={deletePeople} disabled={deleteSubmitting || deleteEntries.length === 0}>
+                Delete accounts
+              </Button>
+            </div>
+          </div>
+          <div className="batch-list">
+            {deleteEntries.map((entry) => (
+              <div key={entry.personId} className={`batch-tree status-${entry.status}`}>
+                <div className={entry.status === "done" ? "batch-row struck" : "batch-row"}>
+                  <span>{entry.name}</span>
+                  <Badge tone={entry.status === "failed" ? "danger" : entry.status === "done" ? "success" : "warning"}>{entry.status}</Badge>
+                </div>
+                <div className="batch-children">
+                  {entry.workspaces.length === 0 ? <small>No managed workspaces</small> : null}
+                  {entry.workspaces.map((workspace) => (
+                    <div key={workspace.workspaceId} className={workspace.status === "deleted" ? "batch-child struck" : "batch-child"}>
+                      <span>&darr; &rarr; {workspace.name}</span>
+                      <Badge tone={workspace.status === "failed" ? "danger" : workspace.status === "deleted" ? "success" : "warning"}>{workspace.status}</Badge>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
       </Dialog>
 
       <Dialog
@@ -952,22 +1239,34 @@ export function AdminPage({ onBack, onSignedOut, currentIp, session }: { onBack:
         }}
         title={`${workspaceAction ? workspaceAction[0]!.toUpperCase() + workspaceAction.slice(1) : "Update"} workspaces`}
         description={`${selectedWorkspaceCount} workspace${selectedWorkspaceCount === 1 ? "" : "s"} selected.`}
-        footer={
-          <>
-            <Button variant="secondary" onClick={() => setWorkspaceAction(null)}>Cancel</Button>
-            <Button
-              variant={workspaceAction === "delete" ? "danger" : "primary"}
-              onClick={async () => {
-                if (workspaceAction) await batch(workspaceAction);
-                setWorkspaceAction(null);
-              }}
-            >
-              Confirm
-            </Button>
-          </>
-        }
       >
-        <p>This action will be sent to Coder as a workspace build operation.</p>
+        <div className="stack">
+          <div className="dialog-top-actions">
+            <div className="actions">
+              <Button variant="secondary" onClick={() => setWorkspaceAction(null)} disabled={workspaceActionSubmitting}>Close</Button>
+              <Button
+                variant={workspaceAction === "delete" ? "danger" : "primary"}
+                onClick={() => {
+                  if (workspaceAction) void runWorkspaceAction(workspaceAction);
+                }}
+                disabled={workspaceActionSubmitting || workspaceActionEntries.length === 0}
+              >
+                Confirm
+              </Button>
+            </div>
+          </div>
+          <p>This action will be sent to Coder as a workspace build operation.</p>
+          <div className="batch-list">
+            {workspaceActionEntries.map((entry) => (
+              <div key={entry.workspaceRecordId} className={`batch-row status-${entry.status}`}>
+                <span>{entry.name}</span>
+                <small>{entry.owner}</small>
+                <strong>&rarr; {entry.action}</strong>
+                <Badge tone={entry.status === "failed" ? "danger" : entry.status === "done" ? "success" : "warning"}>{entry.status}</Badge>
+              </div>
+            ))}
+          </div>
+        </div>
       </Dialog>
       </section>
     </main>

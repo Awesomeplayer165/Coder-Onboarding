@@ -160,13 +160,6 @@ export function OnboardingPage({ group, onBack, onCredentials }: { group: Public
             <div className="stack">
               <p className="subtle">If you believe you already have an account, talk to an admin.</p>
               <div className="email-options">
-                <label className="radio-card recommended">
-                  <div className="radio-line">
-                    <input type="radio" checked={emailMode === "custom"} onChange={() => setEmailMode("custom")} />
-                    <span>Use a personal email</span>
-                  </div>
-                  <Input type="email" value={customEmail} onChange={(event) => setCustomEmail(event.target.value)} placeholder="you@example.com" />
-                </label>
                 {(["first.last", "firstlast", "f.lastname"] as const).map((mode) => (
                   <label className="radio-card" key={mode}>
                     <div className="radio-line">
@@ -175,6 +168,13 @@ export function OnboardingPage({ group, onBack, onCredentials }: { group: Public
                     </div>
                   </label>
                 ))}
+                <label className="radio-card recommended">
+                  <div className="radio-line">
+                    <input type="radio" checked={emailMode === "custom"} onChange={() => setEmailMode("custom")} />
+                    <span>Use a personal email</span>
+                  </div>
+                  <Input type="email" value={customEmail} onChange={(event) => setCustomEmail(event.target.value)} placeholder="you@example.com" />
+                </label>
               </div>
               <Button type="submit">Create credentials</Button>
             </div>

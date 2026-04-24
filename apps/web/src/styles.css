@@ -1149,6 +1149,65 @@ select:focus {
   border-top: 1px solid var(--border);
 }
 
+.dialog-top-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.batch-list,
+.batch-children {
+  display: grid;
+  gap: 10px;
+}
+
+.batch-row,
+.batch-child {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-strong);
+  padding: 12px 14px;
+}
+
+.batch-row strong,
+.batch-child strong {
+  margin-left: auto;
+}
+
+.batch-tree {
+  display: grid;
+  gap: 8px;
+}
+
+.batch-children {
+  padding-left: 20px;
+}
+
+.batch-child {
+  margin-left: 10px;
+}
+
+.status-pending,
+.status-syncing,
+.status-running,
+.status-workspace_deleting,
+.status-user_deleting {
+  opacity: 0.92;
+}
+
+.struck span,
+.struck small,
+.struck strong {
+  text-decoration: line-through;
+  text-decoration-thickness: 1.5px;
+}
+
 .dialog-close {
   position: absolute;
   top: 14px;

@@ -34,6 +34,10 @@ function jsonError(error: unknown, status = 400) {
   return { error: error instanceof Error ? error.message : String(error), status };
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function singletonOrganization() {
   const [org] = await db.select().from(organizations).limit(1);
   return org ?? null;
@@ -85,12 +89,19 @@ async function createOrSyncCoderUser(person: typeof people.$inferSelect) {
     coderUsername: person.coderUsername
   });
 
+  const currentRoles = new Set((coderUser.roles ?? []).map((role) => role.name));
+  const shouldBeUserAdmin = person.role === "admin";
+  const nextRoles = Array.from(
+    shouldBeUserAdmin ? new Set([...currentRoles, "user-admin"]) : new Set([...currentRoles].filter((role) => role !== "user-admin"))
+  );
+  const syncedUser = shouldBeUserAdmin || currentRoles.has("user-admin") !== shouldBeUserAdmin ? await coder.updateUserRoles(coderUser.id, nextRoles) : coderUser;
+
   await db
     .update(people)
-    .set({ coderUserId: coderUser.id, coderUsername: coderUser.username, updatedAt: new Date(), lastLoginAt: new Date() })
+    .set({ coderUserId: syncedUser.id, coderUsername: syncedUser.username, updatedAt: new Date(), lastLoginAt: new Date() })
     .where(eq(people.id, person.id));
 
-  return { coderUser, password };
+  return { coderUser: syncedUser, password };
 }
 
 async function maybeCreateDefaultWorkspace(person: typeof people.$inferSelect, group: typeof groups.$inferSelect) {
@@ -154,10 +165,40 @@ async function maybeCreateDefaultWorkspace(person: typeof people.$inferSelect, g
   return record ?? null;
 }
 
-async function deletePersonEverywhere(person: typeof people.$inferSelect) {
+async function syncWorkspaceStatuses(records?: (typeof workspaceRecords.$inferSelect)[]) {
+  const localRecords = records ?? (await db.select().from(workspaceRecords));
+  if (localRecords.length === 0) return;
+
+  for (const record of localRecords) {
+    const remote = await coder.getWorkspace(record.coderWorkspaceId);
+    const nextStatus = remote?.latest_build?.status ?? (remote ? record.status : "deleted");
+    const nextTemplateName = remote?.template_display_name ?? remote?.template_name ?? record.templateName;
+    if (nextStatus !== record.status || nextTemplateName !== record.templateName) {
+      await db
+        .update(workspaceRecords)
+        .set({ status: nextStatus, templateName: nextTemplateName, lastSyncedAt: new Date() })
+        .where(eq(workspaceRecords.id, record.id));
+    }
+  }
+}
+
+async function waitForWorkspaceDeletion(workspaceId: string) {
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    const workspace = await coder.getWorkspace(workspaceId);
+    if (!workspace) return;
+    await sleep(2000);
+  }
+  throw new Error(`Workspace ${workspaceId} is still deleting in Coder.`);
+}
+
+async function deletePersonEverywhere(
+  person: typeof people.$inferSelect,
+  onProgress?: (event: { stage: string; workspaceId?: string | undefined; workspaceName?: string | undefined }) => Promise<void> | void
+) {
   const localWorkspaces = await db.select().from(workspaceRecords).where(eq(workspaceRecords.personId, person.id));
   const coderWorkspaces = person.coderUsername ? await coder.listWorkspaces(person.coderUsername).catch(() => []) : [];
   const workspaceIds = new Set(localWorkspaces.map((workspace) => workspace.coderWorkspaceId));
+  const workspaceNames = new Map(localWorkspaces.map((workspace) => [workspace.coderWorkspaceId, workspace.name]));
   for (const workspace of coderWorkspaces) {
     if (
       workspace.owner_id === person.coderUserId ||
@@ -166,14 +207,21 @@ async function deletePersonEverywhere(person: typeof people.$inferSelect) {
       localWorkspaces.some((local) => local.coderWorkspaceId === workspace.id)
     ) {
       workspaceIds.add(workspace.id);
+      workspaceNames.set(workspace.id, workspace.name);
     }
   }
   for (const workspaceId of workspaceIds) {
+    await onProgress?.({ stage: "workspace_deleting", workspaceId, workspaceName: workspaceNames.get(workspaceId) });
     await coder.createWorkspaceBuild(workspaceId, "delete").catch(() => undefined);
+  }
+  for (const workspaceId of workspaceIds) {
+    await waitForWorkspaceDeletion(workspaceId);
+    await onProgress?.({ stage: "workspace_deleted", workspaceId, workspaceName: workspaceNames.get(workspaceId) });
   }
 
   const coderIdentifier = person.coderUserId ?? person.coderUsername ?? person.email;
   if (coderIdentifier) {
+    await onProgress?.({ stage: "user_deleting" });
     await coder.deleteUser(coderIdentifier).catch(async (error) => {
       if (person.coderUsername && person.coderUsername !== coderIdentifier) {
         await coder.deleteUser(person.coderUsername);
@@ -185,6 +233,7 @@ async function deletePersonEverywhere(person: typeof people.$inferSelect) {
 
   await db.delete(workspaceRecords).where(eq(workspaceRecords.personId, person.id));
   await db.delete(people).where(eq(people.id, person.id));
+  await onProgress?.({ stage: "user_deleted" });
 }
 
 async function credentialResponse(personId: string) {
@@ -765,6 +814,7 @@ export function buildApp() {
   app.get("/api/admin/workspaces", async (c) => {
     const denied = requireAdmin(c);
     if (denied) return denied;
+    await syncWorkspaceStatuses();
     const rows = await db
       .select({
         workspace: workspaceRecords,
@@ -900,7 +950,48 @@ export function buildApp() {
     if (denied) return denied;
     try {
       const input = z.object({ personIds: z.array(z.string().uuid()), role: z.enum(["participant", "reviewer", "admin"]) }).parse(await c.req.json());
+      const rows = await db.select().from(people).where(inArray(people.id, input.personIds));
       await db.update(people).set({ role: input.role, updatedAt: new Date() }).where(inArray(people.id, input.personIds));
+      const updatedPeople = await db.select().from(people).where(inArray(people.id, input.personIds));
+      const updates: { personId: string; name: string; fromRole: string; toRole: string }[] = [];
+      for (const person of updatedPeople) {
+        const previous = rows.find((row) => row.id === person.id);
+        updates.push({
+          personId: person.id,
+          name: `${person.firstName} ${person.lastName}`.trim(),
+          fromRole: previous?.role ?? person.role,
+          toRole: person.role
+        });
+        broadcastAdminUpdate("people.roles.progress", {
+          personId: person.id,
+          name: `${person.firstName} ${person.lastName}`.trim(),
+          stage: "syncing",
+          fromRole: previous?.role ?? person.role,
+          toRole: person.role
+        });
+        try {
+          if (person.role === "admin" || person.coderUserId || person.coderUsername) {
+            await createOrSyncCoderUser(person);
+          }
+        } catch (error) {
+          broadcastAdminUpdate("people.roles.progress", {
+            personId: person.id,
+            name: `${person.firstName} ${person.lastName}`.trim(),
+            stage: "failed",
+            fromRole: previous?.role ?? person.role,
+            toRole: person.role,
+            error: error instanceof Error ? error.message : String(error)
+          });
+          throw error;
+        }
+        broadcastAdminUpdate("people.roles.progress", {
+          personId: person.id,
+          name: `${person.firstName} ${person.lastName}`.trim(),
+          stage: "done",
+          fromRole: previous?.role ?? person.role,
+          toRole: person.role
+        });
+      }
       await audit({
         actorPersonId: (c.get("session") as AppSession | null)?.person?.id ?? null,
         action: "people.roles.updated",
@@ -908,7 +999,7 @@ export function buildApp() {
         metadata: input
       });
       broadcastAdminUpdate("people.roles.updated", { count: input.personIds.length, role: input.role });
-      return c.json({ ok: true });
+      return c.json({ ok: true, updates });
     } catch (error) {
       const e = jsonError(error);
       return c.json({ error: e.error }, e.status as 400);
@@ -921,8 +1012,37 @@ export function buildApp() {
     try {
       const input = z.object({ personIds: z.array(z.string().uuid()).min(1) }).parse(await c.req.json());
       const rows = await db.select().from(people).where(inArray(people.id, input.personIds));
+      const localWorkspaceRows = await db.select().from(workspaceRecords).where(inArray(workspaceRecords.personId, input.personIds));
+      const summaries = rows.map((person) => ({
+        personId: person.id,
+        name: `${person.firstName} ${person.lastName}`.trim(),
+        workspaces: localWorkspaceRows
+          .filter((workspace) => workspace.personId === person.id)
+          .map((workspace) => ({ workspaceId: workspace.id, coderWorkspaceId: workspace.coderWorkspaceId, name: workspace.name }))
+      }));
       for (const person of rows) {
-        await deletePersonEverywhere(person);
+        broadcastAdminUpdate("people.delete.progress", {
+          personId: person.id,
+          name: `${person.firstName} ${person.lastName}`.trim(),
+          stage: "starting"
+        });
+        try {
+          await deletePersonEverywhere(person, async (event) => {
+            broadcastAdminUpdate("people.delete.progress", {
+              personId: person.id,
+              name: `${person.firstName} ${person.lastName}`.trim(),
+              ...event
+            });
+          });
+        } catch (error) {
+          broadcastAdminUpdate("people.delete.progress", {
+            personId: person.id,
+            name: `${person.firstName} ${person.lastName}`.trim(),
+            stage: "failed",
+            error: error instanceof Error ? error.message : String(error)
+          });
+          throw error;
+        }
       }
       await audit({
         actorPersonId: (c.get("session") as AppSession | null)?.person?.id ?? null,
@@ -931,7 +1051,7 @@ export function buildApp() {
         metadata: input
       });
       broadcastAdminUpdate("people.deleted", { count: rows.length });
-      return c.json({ deleted: rows.length });
+      return c.json({ deleted: rows.length, people: summaries });
     } catch (error) {
       const e = jsonError(error);
       return c.json({ error: e.error }, e.status as 400);
