@@ -1,5 +1,5 @@
 import { getEnv } from "../env";
-import { coderLoginUrl, coderUsernameFromEmail } from "../domain/email";
+import { coderLoginUrl, coderUsernameFromEmail, coderUsernameFromName } from "../domain/email";
 
 export type CoderUser = {
   id: string;
@@ -88,8 +88,36 @@ export class CoderClient {
     }
   }
 
-  async createUser(input: { email: string; password: string; firstName: string; lastName: string }) {
-    const username = coderUsernameFromEmail(input.email);
+  private buildUsernameCandidate(base: string, attempt: number) {
+    if (attempt === 0) return base;
+    const suffix = `-${attempt + 1}`;
+    return `${base.slice(0, Math.max(1, 48 - suffix.length))}${suffix}`;
+  }
+
+  private async resolveAvailableUsername(base: string, existingUserId?: string) {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const candidate = this.buildUsernameCandidate(base, attempt);
+      const existing = await this.getUser(candidate);
+      if (!existing || existing.id === existingUserId) return candidate;
+    }
+    throw new Error(`Unable to find an available Coder username for ${base}.`);
+  }
+
+  private preferredUsername(input: { email: string; firstName: string; lastName: string; coderUsername?: string | null }) {
+    if (input.coderUsername && input.coderUsername !== coderUsernameFromEmail(input.email)) {
+      return input.coderUsername;
+    }
+    return coderUsernameFromName(input.firstName, input.lastName);
+  }
+
+  async updateUserProfile(user: string, input: { name: string; username: string }) {
+    return this.request<CoderUser>(`/users/${encodeURIComponent(user)}/profile`, {
+      method: "PUT",
+      body: JSON.stringify(input)
+    });
+  }
+
+  async createUser(input: { email: string; password: string; firstName: string; lastName: string; username: string }) {
     return this.request<CoderUser>("/users", {
       method: "POST",
       body: JSON.stringify({
@@ -97,7 +125,7 @@ export class CoderClient {
         login_type: "password",
         name: `${input.firstName} ${input.lastName}`.trim(),
         password: input.password,
-        username,
+        username: input.username,
         user_status: "active",
         service_account: false,
         organization_ids: getEnv().CODER_ORGANIZATION_ID ? [getEnv().CODER_ORGANIZATION_ID] : undefined
@@ -107,21 +135,26 @@ export class CoderClient {
 
   async ensureUser(input: { email: string; password: string; firstName: string; lastName: string; coderUsername?: string | null }) {
     const existing = await this.findUserByEmail(input.email);
-    if (existing) return existing;
-    const username = input.coderUsername ?? coderUsernameFromEmail(input.email);
-    const byUsername = await this.getUser(username);
-    if (byUsername) {
-      if (byUsername.email.toLowerCase() === input.email.toLowerCase()) return byUsername;
-      throw new CoderApiError(`Coder username ${username} is already used by another account.`, 409, byUsername);
+    const displayName = `${input.firstName} ${input.lastName}`.trim();
+    const preferredUsername = this.preferredUsername(input);
+    if (existing) {
+      const username = await this.resolveAvailableUsername(preferredUsername, existing.id);
+      if (existing.username !== username || existing.name !== displayName) {
+        return this.updateUserProfile(existing.id, { name: displayName, username });
+      }
+      return existing;
     }
+    const username = await this.resolveAvailableUsername(preferredUsername);
     try {
-      return await this.createUser(input);
+      return await this.createUser({ ...input, username });
     } catch (error) {
       if (error instanceof CoderApiError && error.status === 409) {
         const afterConflictByEmail = await this.findUserByEmail(input.email);
         if (afterConflictByEmail) return afterConflictByEmail;
-        const afterConflictByUsername = await this.getUser(username);
+        const retryUsername = await this.resolveAvailableUsername(preferredUsername);
+        const afterConflictByUsername = await this.getUser(retryUsername);
         if (afterConflictByUsername?.email.toLowerCase() === input.email.toLowerCase()) return afterConflictByUsername;
+        return await this.createUser({ ...input, username: retryUsername });
       }
       throw error;
     }

@@ -45,6 +45,13 @@ export function coderUsernameFromEmail(email: string) {
     .slice(0, 48);
 }
 
+export function coderUsernameFromName(firstName: string, lastName: string) {
+  const first = usernamePart(firstName);
+  const last = usernamePart(lastName);
+  const combined = [first, last].filter(Boolean).join("-") || "user";
+  return combined.slice(0, 48);
+}
+
 export function coderLoginUrl(coderUrl: string) {
   const url = new URL(coderUrl);
   url.pathname = `${url.pathname.replace(/\/+$/, "")}/login`;

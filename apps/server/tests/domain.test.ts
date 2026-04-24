@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { deriveEmail, emailOptions, coderLoginUrl } from "../src/domain/email";
+import { coderLoginUrl, coderUsernameFromName, deriveEmail, emailOptions } from "../src/domain/email";
 import { findNameMatches } from "../src/domain/fuzzy";
 import { parsePeopleCsv } from "../src/domain/csv";
 import { ipv4Allowed } from "../src/domain/ip";
@@ -27,6 +27,14 @@ describe("email derivation", () => {
 
   test("normalizes Coder login URL", () => {
     expect(coderLoginUrl("https://coder.example.com/")).toBe("https://coder.example.com/login");
+  });
+
+  test("builds Coder usernames from first and last name", () => {
+    expect(coderUsernameFromName("Ada", "Lovelace")).toBe("ada-lovelace");
+  });
+
+  test("normalizes Coder usernames from complex names", () => {
+    expect(coderUsernameFromName("Mary Jane", "O'Neil-Smith")).toBe("maryjane-oneilsmith");
   });
 });
 
