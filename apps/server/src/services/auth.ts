@@ -71,6 +71,7 @@ export async function readSession(c: Context): Promise<AppSession | null> {
     .where(eq(adminGrants.email, person.email.toLowerCase()))
     .limit(1);
   const isAdmin = person.role === "admin" || Boolean(grant);
+  const isInitialAdminPlaceholder = isAdmin && person.firstName === "Initial" && person.lastName === "Admin";
 
   return {
     id: session.id,
@@ -78,8 +79,8 @@ export async function readSession(c: Context): Promise<AppSession | null> {
     person: {
       id: person.id,
       email: person.email,
-      firstName: person.firstName,
-      lastName: person.lastName,
+      firstName: isInitialAdminPlaceholder ? "Admin" : person.firstName,
+      lastName: isInitialAdminPlaceholder ? "" : person.lastName,
       role: person.role,
       groupId: person.groupId,
       isAdmin

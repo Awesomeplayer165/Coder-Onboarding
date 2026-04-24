@@ -5,9 +5,17 @@ import { Card } from "../components/ui/Card";
 
 export function CredentialsPage({
   credentials,
+  isSignedIn,
+  isAdmin,
+  onHome,
+  onAdmin,
   onDone
 }: {
   credentials: { email: string; password: string; coderLoginUrl: string };
+  isSignedIn?: boolean;
+  isAdmin?: boolean;
+  onHome?: () => void;
+  onAdmin?: () => void;
   onDone: () => void;
 }) {
   const [copied, setCopied] = useState<string | null>(null);
@@ -41,9 +49,21 @@ export function CredentialsPage({
           <a className="button button-primary" href={credentials.coderLoginUrl} target="_blank" rel="noreferrer">
             <ExternalLink size={18} /> Open Coder
           </a>
-          <Button variant="secondary" onClick={onDone}>
-            Done
-          </Button>
+          {isSignedIn && onHome ? (
+            <Button variant="secondary" onClick={onHome}>
+              Home
+            </Button>
+          ) : null}
+          {isSignedIn && isAdmin && onAdmin ? (
+            <Button variant="secondary" onClick={onAdmin}>
+              Admin
+            </Button>
+          ) : null}
+          {!isSignedIn ? (
+            <Button variant="secondary" onClick={onDone}>
+              Done
+            </Button>
+          ) : null}
         </div>
       </Card>
     </main>

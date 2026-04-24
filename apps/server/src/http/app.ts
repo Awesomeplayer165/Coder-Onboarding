@@ -357,7 +357,7 @@ export function buildApp() {
       await db.insert(adminGrants).values({ email: input.firstAdminEmail.toLowerCase() });
       const [reviewerGroup] = await db.select().from(groups).where(and(eq(groups.organizationId, org.id), eq(groups.name, input.reviewerGroupName))).limit(1);
       if (!reviewerGroup) throw new Error("Reviewer group was not created.");
-      const adminName = cleanPersonName("Initial", "Admin");
+      const adminName = cleanPersonName("Admin", "");
       const [adminPerson] = await db
         .insert(people)
         .values({
@@ -371,7 +371,7 @@ export function buildApp() {
           passwordEncrypted: encryptedPassword
         })
         .returning();
-      if (!adminPerson) throw new Error("Initial Admin was not created.");
+      if (!adminPerson) throw new Error("Admin account was not created.");
       await createSession(c, adminPerson.id);
       await audit({ action: "setup.completed", targetType: "organization", targetId: org.id });
       broadcastAdminUpdate("setup.completed", { organizationId: org.id });
@@ -383,6 +383,17 @@ export function buildApp() {
   });
 
   app.get("/api/session", async (c) => c.json(c.get("session") ?? null));
+
+  app.get("/api/session/credentials", async (c) => {
+    const session = c.get("session") as AppSession | null;
+    if (!session?.person) return c.json({ error: "Sign in is required." }, 401);
+    try {
+      return c.json(await credentialResponse(session.person.id));
+    } catch (error) {
+      const e = jsonError(error);
+      return c.json({ error: e.error }, e.status as 400);
+    }
+  });
 
   app.post("/api/session/logout", async (c) => {
     await destroySession(c);
@@ -563,9 +574,11 @@ export function buildApp() {
           })
           .returning();
       } else {
+        const shouldRenameInitialAdmin = grant && person.firstName === "Initial" && person.lastName === "Admin";
         await db
           .update(people)
           .set({
+            ...(shouldRenameInitialAdmin ? { firstName: "Admin", lastName: "", normalizedName: normalizedFullName("Admin", "") } : {}),
             oidcIssuer: claims.iss,
             oidcSubject: claims.sub,
             role: grant ? "admin" : person.role === "admin" ? "admin" : "reviewer",

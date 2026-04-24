@@ -6,6 +6,7 @@ import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Card";
 import { Field, Input } from "../components/ui/Input";
+import { useToast } from "../components/ui/Toast";
 
 type Match = {
   id: string;
@@ -31,13 +32,13 @@ function relativeTime(value?: string | null) {
 }
 
 export function OnboardingPage({ group, onBack, onCredentials }: { group: PublicGroup; onBack: () => void; onCredentials: (value: Credentials) => void }) {
+  const toast = useToast();
   const [name, setName] = useState({ firstName: "", lastName: "" });
   const [matches, setMatches] = useState<Match[] | null>(null);
   const [emailOptions, setEmailOptions] = useState<Record<string, string>>({});
   const [emailMode, setEmailMode] = useState<"first.last" | "firstlast" | "f.lastname" | "custom">("custom");
   const [customEmail, setCustomEmail] = useState("");
   const [suggestions, setSuggestions] = useState<{ id: string; name: string; lastLoginAt: string | null }[]>([]);
-  const [error, setError] = useState("");
 
   function updateName(part: "firstName" | "lastName", value: string) {
     setName((current) => ({ ...current, [part]: value }));
@@ -62,7 +63,6 @@ export function OnboardingPage({ group, onBack, onCredentials }: { group: Public
 
   async function lookup(event: React.FormEvent) {
     event.preventDefault();
-    setError("");
     try {
       const result = await api<{ matches: Match[]; emailOptions: Record<string, string> }>("/api/onboarding/lookup", {
         method: "POST",
@@ -71,31 +71,36 @@ export function OnboardingPage({ group, onBack, onCredentials }: { group: Public
       setMatches(result.matches);
       setEmailOptions(result.emailOptions);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      toast({ title: "Lookup failed", description: err instanceof Error ? err.message : String(err), tone: "danger" });
     }
   }
 
   async function claim(personId: string) {
-    const result = await api<Credentials>("/api/onboarding/claim", { method: "POST", body: JSON.stringify({ groupId: group.id, personId }) });
-    onCredentials(result);
+    try {
+      const result = await api<Credentials>("/api/onboarding/claim", { method: "POST", body: JSON.stringify({ groupId: group.id, personId }) });
+      toast({ title: "Coder credentials ready", tone: "success" });
+      onCredentials(result);
+    } catch (err) {
+      toast({ title: "Could not load credentials", description: err instanceof Error ? err.message : String(err), tone: "danger" });
+    }
   }
 
   async function register(event: React.FormEvent) {
     event.preventDefault();
-    setError("");
     try {
       const result = await api<Credentials>("/api/onboarding/register", {
         method: "POST",
         body: JSON.stringify({ groupId: group.id, ...name, emailMode, customEmail })
       });
+      toast({ title: "Coder credentials created", tone: "success" });
       onCredentials(result);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      toast({ title: "Could not create credentials", description: err instanceof Error ? err.message : String(err), tone: "danger" });
     }
   }
 
   if (group.authMode === "oidc") {
-    window.location.href = `/api/oidc/${group.id}/start`;
+    window.location.href = `/api/oidc/${group.id}/start?redirectTo=${encodeURIComponent("/credentials")}`;
     return (
       <main className="center-screen">
         <Card>
@@ -174,7 +179,6 @@ export function OnboardingPage({ group, onBack, onCredentials }: { group: Public
               <Button type="submit">Create credentials</Button>
             </div>
           ) : null}
-          {error ? <p className="error">{error}</p> : null}
         </form>
       </Card>
     </main>

@@ -3,8 +3,10 @@ import { api } from "../lib/api";
 import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
 import { Field, Input } from "../components/ui/Input";
+import { useToast } from "../components/ui/Toast";
 
 export function SetupPage({ onDone }: { onDone: () => void }) {
+  const toast = useToast();
   const [form, setForm] = useState({
     token: "",
     organizationName: "Default organization",
@@ -14,16 +16,15 @@ export function SetupPage({ onDone }: { onDone: () => void }) {
     sharedPassword: "",
     firstAdminEmail: ""
   });
-  const [error, setError] = useState("");
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
-    setError("");
     try {
       await api("/api/setup", { method: "POST", body: JSON.stringify(form) });
+      toast({ title: "Setup complete", tone: "success" });
       onDone();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      toast({ title: "Setup failed", description: err instanceof Error ? err.message : String(err), tone: "danger" });
     }
   }
 
@@ -56,7 +57,6 @@ export function SetupPage({ onDone }: { onDone: () => void }) {
           <Field label="First Admin email">
             <Input type="email" value={form.firstAdminEmail} onChange={(event) => setForm({ ...form, firstAdminEmail: event.target.value })} required />
           </Field>
-          {error ? <p className="error">{error}</p> : null}
           <Button type="submit">Create setup</Button>
         </form>
       </Card>
