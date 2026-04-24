@@ -182,7 +182,7 @@ export class CoderClient {
     try {
       return await this.request<CoderWorkspace>(`/workspaces/${encodeURIComponent(workspaceId)}`);
     } catch (error) {
-      if (error instanceof CoderApiError && error.status === 404) return null;
+      if (error instanceof CoderApiError && (error.status === 404 || error.status === 410)) return null;
       throw error;
     }
   }
