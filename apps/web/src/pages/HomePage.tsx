@@ -64,7 +64,7 @@ export function HomePage({
         <section className="signed-in-panel">
           <div>
             <h2>Signed in as {bootstrap.session.person.firstName}</h2>
-            <p>Jump back to your Coder credentials any time, or head into admin if this account has access.</p>
+            <p>Jump back to your Coder credentials any time.</p>
           </div>
           <div className="actions signed-in-actions">
             <Button onClick={onShowCredentials}>
